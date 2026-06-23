@@ -24,6 +24,7 @@ source of truth for the connection string.
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import contextmanager
 from typing import Iterator, Optional
 
@@ -36,6 +37,7 @@ from config.settings import settings
 logger = logging.getLogger(__name__)
 
 _pool: Optional[ConnectionPool] = None
+_pool_pid: Optional[int] = None  # PID that opened _pool — for fork-safety
 
 
 def _is_pooler(dsn: str) -> bool:
@@ -89,6 +91,11 @@ def _build_pool() -> ConnectionPool:
         name="cobra-pool",
         open=False,  # opened explicitly via open_pool()
         configure=_make_configure(dsn),
+        # Validate a connection on checkout and recycle dead ones. A Supabase
+        # pooler can close/rotate the underlying server connection between uses,
+        # leaving a pooled conn stale (→ SSL "bad record mac" / "unexpected eof");
+        # this transparently discards it and hands back a fresh one.
+        check=ConnectionPool.check_connection,
         kwargs={
             "row_factory": dict_row,
             "connect_timeout": settings.db_connect_timeout,
@@ -99,7 +106,17 @@ def _build_pool() -> ConnectionPool:
 
 
 def get_pool() -> ConnectionPool:
-    global _pool
+    global _pool, _pool_pid
+    # Fork-safety: a pool opened BEFORE a fork (e.g. gunicorn --preload, or any
+    # pre-fork DB use) has live sockets owned by the PARENT process. Inheriting
+    # and using them from a worker means two processes share one SSL connection →
+    # "decryption failed / bad record mac" / "unexpected eof". If the PID changed,
+    # abandon the inherited pool (do NOT close it — those FDs belong to the parent)
+    # and build a fresh pool for THIS process.
+    if _pool is not None and _pool_pid != os.getpid():
+        logger.warning("DB pool inherited across a fork — rebuilding for pid %d", os.getpid())
+        _pool = None
+        _pool_pid = None
     if _pool is None:
         pool = _build_pool()
         # Open with wait so the first use — Flask startup OR a standalone script
@@ -112,6 +129,7 @@ def get_pool() -> ConnectionPool:
             pool.close()
             raise
         _pool = pool
+        _pool_pid = os.getpid()
     return _pool
 
 
@@ -128,10 +146,11 @@ def open_pool() -> None:
 
 def close_pool() -> None:
     """Close the pool and all its connections. Call at shutdown."""
-    global _pool
+    global _pool, _pool_pid
     if _pool is not None:
         _pool.close()
         _pool = None
+        _pool_pid = None
         logger.info("DB pool closed")
 
 
