@@ -227,6 +227,34 @@ def _effective_state(state: IndexState, is_pin: bool) -> IndexState:
     return state
 
 
+# Minimum wall strength to actually fade a HOLDING wall (size axis, not change).
+MIN_FADE_STRENGTH = 3
+
+
+def _action(verdict: str, conviction: str, strength: Optional[int], state: IndexState) -> str:
+    """The one-line decision verb (the trader wants the verb mid-trade, not the
+    diagnosis). FADE OK / DON'T FADE / WAIT.
+
+      confirmed BREAKOUT/DOWN  → DON'T FADE  (respect the break — go with the move)
+      DIVERGENCE / PARTIAL / unconfirmed → WAIT (no cross-confirmation)
+      HOLDING (building) + strength ≥3   → FADE OK
+      quiet but the wall is STABLE (flat) + strength ≥3 → FADE OK
+          (a "flat but huge" wall is very fade-able; a "building but tiny" one isn't)
+      otherwise → WAIT (thin wall, or no read yet)
+    """
+    v = verdict.upper()
+    strong = (strength or 0) >= MIN_FADE_STRENGTH
+    if "BREAKOUT" in v or "BREAKDOWN" in v:
+        return "DON'T FADE" if conviction != "UNCONFIRMED" else "WAIT"
+    if "DIVERGENCE" in v or v.startswith("PARTIAL"):
+        return "WAIT"
+    if "HOLDING" in v:
+        return "FADE OK" if strong else "WAIT"
+    if "NO SIGNAL" in v:                      # quiet: fade only a stable + dominant wall
+        return "FADE OK" if (strong and state == "flat") else "WAIT"
+    return "WAIT"
+
+
 def side_verdict(
     side: str,
     nifty: WallSignal,
@@ -273,9 +301,13 @@ def side_verdict(
             verdict, conv, meaning = "NO SIGNAL (NIFTY-ONLY)", "NONE", "Insufficient history yet; Sensex unavailable."
         if pin_involved and conv == "HIGH":
             conv = "MODERATE"
+        action = _action(verdict, conv, nifty.strength, n)
+        if action == "WAIT" and ("HOLDING" in verdict.upper() or "NO SIGNAL" in verdict.upper()):
+            if (nifty.strength or 0) < MIN_FADE_STRENGTH:
+                meaning += " (thin wall — strength < 3; hold off.)"
         return SideVerdict(
             side=side, option_type=option_type, wall_strike=nifty.wall.strike,
-            verdict=verdict, conviction=conv, meaning=meaning, tag=tag,
+            verdict=verdict, conviction=conv, action=action, meaning=meaning, tag=tag,
             nifty_sig=nifty.summary, sensex_sig=None,
             dte_n=dte_n, dte_s=dte_s, suppressed=True, expiry_label=assessment.label,
             nifty=nifty, sensex=None,
@@ -315,9 +347,14 @@ def side_verdict(
         conv = "MODERATE"
         meaning += " (pin day — capped, don't size up on settlement.)"
 
+    action = _action(verdict, conv, nifty.strength, n)
+    if action == "WAIT" and ("HOLDING" in verdict.upper() or "NO SIGNAL" in verdict.upper()):
+        if (nifty.strength or 0) < MIN_FADE_STRENGTH:
+            meaning += " (thin wall — strength < 3; hold off.)"
+
     return SideVerdict(
         side=side, option_type=option_type, wall_strike=nifty.wall.strike,
-        verdict=verdict, conviction=conv, meaning=meaning, tag=tag,
+        verdict=verdict, conviction=conv, action=action, meaning=meaning, tag=tag,
         nifty_sig=nifty.summary, sensex_sig=sensex.summary,
         dte_n=dte_n, dte_s=dte_s, suppressed=False, expiry_label=assessment.label,
         nifty=nifty, sensex=sensex,

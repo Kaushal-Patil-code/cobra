@@ -268,3 +268,81 @@ def test_build_state_no_walls(monkeypatch):
     monkeypatch.setattr(engine, "read_monitored_strikes", lambda d: [])
     state = engine.build_state(trading_date=date(2026, 6, 19), now=NOW)
     assert state.sides == [] and state.note and "no walls" in state.note
+
+
+# --- action verb (the one-line decision) -----------------------------------
+
+def _wall_str(index, state, strength, **kw):
+    w = _wall(index, state, **kw)
+    w.strength = strength
+    return w
+
+
+def test_action_fade_ok_when_holding_and_strong_wall():
+    v = side_verdict("CAP", _wall_str("NIFTY", "building", 4, magnitude="signal"),
+                     _wall("SENSEX", "building", "strong"), _assess())
+    assert v.verdict == "CAP HOLDING" and v.action == "FADE OK"
+
+
+def test_action_wait_when_holding_but_thin_wall():
+    v = side_verdict("CAP", _wall_str("NIFTY", "building", 2, magnitude="signal"),
+                     _wall("SENSEX", "building", "strong"), _assess())
+    assert v.verdict == "CAP HOLDING" and v.action == "WAIT"   # strength < 3 → don't fade
+
+
+def test_action_dont_fade_on_confirmed_break():
+    v = side_verdict("FLOOR", _wall_str("NIFTY", "unwinding", 4, magnitude="signal", streak=2, trend=False, ot="PE"),
+                     _wall("SENSEX", "unwinding", "signal", streak=2, trend=False, ot="PE"), _assess())
+    assert v.verdict == "BREAKDOWN" and v.action == "DON'T FADE"
+
+
+def test_action_wait_on_unconfirmed_break_even_if_strong():
+    # never fade a strength-5 unwind, but an UNCONFIRMED break → WAIT (not DON'T FADE yet)
+    v = side_verdict("CAP", _wall_str("NIFTY", "unwinding", 5, magnitude="signal", streak=1, trend=False),
+                     _wall("SENSEX", "unwinding", "signal", streak=2, trend=False), _assess())
+    assert v.conviction == "UNCONFIRMED" and v.action == "WAIT"
+
+
+def test_action_wait_on_divergence_and_partial():
+    div = side_verdict("CAP", _wall("NIFTY", "building"), _wall("SENSEX", "unwinding"), _assess())
+    assert div.verdict == "DIVERGENCE" and div.action == "WAIT"
+    par = side_verdict("CAP", _wall("NIFTY", "building"), _wall("SENSEX", "flat"), _assess())
+    assert par.verdict.startswith("PARTIAL") and par.action == "WAIT"
+
+
+def test_action_fade_ok_when_flat_but_dominant_wall():
+    # "flat but huge" — quiet, but a strength-5 wall is still very fade-able.
+    v = side_verdict("CAP", _wall_str("NIFTY", "flat", 5), _wall("SENSEX", "flat"), _assess())
+    assert v.verdict == "NO SIGNAL" and v.action == "FADE OK"
+
+
+def test_action_wait_when_flat_and_thin_wall():
+    v = side_verdict("CAP", _wall_str("NIFTY", "flat", 2), _wall("SENSEX", "flat"), _assess())
+    assert v.verdict == "NO SIGNAL" and v.action == "WAIT"
+
+
+def test_build_state_attaches_strength_and_action(monkeypatch):
+    from schemas.market import Ladder
+    td = date(2026, 6, 19)
+    nexp, sexp = date(2026, 6, 23), date(2026, 6, 25)
+    monitored = [_ms("CAP", "NIFTY", "CE", 24400, 50, nexp),
+                 _ms("CAP", "SENSEX", "CE", 78000, 100, sexp)]
+    monkeypatch.setattr(engine, "read_monitored_strikes", lambda d: monitored)
+    monkeypatch.setattr(engine, "read_oi_series", lambda i, o, s, e, since: _building_series(1000 + s))
+    monkeypatch.setattr(engine, "read_latest_metrics", lambda d: {})
+    monkeypatch.setattr(engine, "get_ladders", lambda d: {
+        "NIFTY": Ladder(index_name="NIFTY", expiry=nexp, spot_at_lock=24400.0, atm=24400,
+                        interval=50, strikes=[24550, 24500, 24450, 24400, 24350, 24300, 24250, 24200]),
+        "SENSEX": Ladder(index_name="SENSEX", expiry=sexp, spot_at_lock=78000.0, atm=78000,
+                         interval=100, strikes=[78300, 78200, 78100, 78000, 77900, 77800, 77700, 77600]),
+    })
+    # the wall strike dominates its ladder → high strength
+    def _latest(idx, ot, exp, strikes, since):
+        wall = 24400 if idx == "NIFTY" else 78000
+        return {s: (6000 if s == wall else 800) for s in strikes}
+    monkeypatch.setattr(engine, "read_latest_oi", _latest)
+
+    state = engine.build_state(trading_date=td, now=NOW, window_minutes=15)
+    cap = state.sides[0]
+    assert cap.nifty.strength == 5 and cap.nifty.dominance is not None
+    assert cap.verdict == "CAP HOLDING" and cap.action == "FADE OK"

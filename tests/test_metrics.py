@@ -4,10 +4,12 @@ from datetime import date, datetime, timezone
 from compute.metrics import (
     build_ladder,
     compute_atm,
+    dominance_strength,
     index_metrics_from_chain,
     ladder_broken,
     max_pain,
     pcr,
+    strength_bucket,
 )
 from schemas.market import ChainSnapshot, StrikeOI
 
@@ -51,6 +53,31 @@ def test_pcr():
     assert pcr(100, 150) == 1.5
     assert pcr(0, 100) is None          # no call OI
     assert pcr(100, None) is None
+
+
+def test_strength_bucket_edges():
+    assert strength_bucket(1.0) == 1
+    assert strength_bucket(1.3) == 2      # lower-inclusive
+    assert strength_bucket(1.79) == 2
+    assert strength_bucket(1.8) == 3
+    assert strength_bucket(2.5) == 4
+    assert strength_bucket(3.5) == 5
+    assert strength_bucket(10) == 5
+
+
+def test_dominance_strength():
+    # wall 1000 vs peers median 300 → dominance 3.33 → bucket 4
+    dom, s = dominance_strength(1000, [200, 250, 300, 300, 350, 400, 500])
+    assert dom == round(1000 / 300, 2) and s == 4
+    # can't judge without a wall OI or peers
+    assert dominance_strength(None, [1, 2, 3]) == (None, None)
+    assert dominance_strength(1000, []) == (None, None)
+    # peers essentially empty (median 0) → maximally dominant
+    assert dominance_strength(500, [0, 0, 0]) == (None, 5)
+    assert dominance_strength(0, [0, 0, 0]) == (None, 1)
+    # None peers are ignored
+    dom2, s2 = dominance_strength(900, [None, 600, None, 300])  # median(600,300)=450 → 2.0 → 3
+    assert s2 == 3
 
 
 def test_index_metrics_from_chain():

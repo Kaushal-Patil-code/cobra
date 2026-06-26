@@ -1,0 +1,30 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets & local state
+.env
+.env.*
+!.env.example
+
+# Logs (Fyers request/response logs can contain sensitive data — never commit)
+*.log
+
+# Node (frontend deps/build — each frontend also has its own .gitignore)
+node_modules/
+
+# Frontends live in their own repos (cobra-front.git etc.) — not part of the backend repo
+/frontend/
+/frontend-next/
+
+# Test / tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/

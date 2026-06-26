@@ -8,6 +8,7 @@ Two concerns, both derived from data we already pull (no extra Fyers calls):
 from __future__ import annotations
 
 import math
+import statistics
 from typing import Optional, Sequence
 
 from schemas.market import ChainSnapshot, IndexMetrics, StrikeOI
@@ -15,6 +16,38 @@ from schemas.market import ChainSnapshot, IndexMetrics, StrikeOI
 # Ladder reach (v3 §3 / §13): ATM + 3 rungs up, 4 down (intentionally skewed down).
 LADDER_UP = 3
 LADDER_DOWN = 4
+
+# Wall STRENGTH (size, not change): dominance = wall OI ÷ median of the OTHER
+# ladder strikes of the same type → bucket 1-5. Ratio-based on purpose so it
+# self-adjusts and never goes stale (absolute OI thresholds would). Cutoffs are a
+# starting guess — tune on logged data. The bucket edges (lower-inclusive):
+#   <1.3 → 1 · 1.3–1.8 → 2 · 1.8–2.5 → 3 · 2.5–3.5 → 4 · ≥3.5 → 5
+STRENGTH_CUTOFFS = (1.3, 1.8, 2.5, 3.5)
+
+
+def strength_bucket(dominance: float) -> int:
+    """Map a dominance ratio to a 1-5 strength bucket."""
+    return 1 + sum(1 for c in STRENGTH_CUTOFFS if dominance >= c)
+
+
+def dominance_strength(
+    wall_oi: Optional[int], other_ois: Sequence[Optional[int]]
+) -> tuple[Optional[float], Optional[int]]:
+    """(dominance, strength 1-5) for a wall vs the rest of its ladder.
+
+    dominance = wall_oi ÷ median(other strikes' OI). Returns (None, None) when we
+    can't judge (no wall OI / no peers). If the peers are essentially empty
+    (median 0) the wall is maximally dominant → strength 5 (dominance reported as
+    None since the ratio is unbounded).
+    """
+    others = [o for o in other_ois if o is not None]
+    if wall_oi is None or not others:
+        return None, None
+    med = statistics.median(others)
+    if med <= 0:
+        return (None, 5) if wall_oi > 0 else (None, 1)
+    dom = wall_oi / med
+    return round(dom, 2), strength_bucket(dom)
 
 
 def compute_atm(spot: float, interval: int) -> int:

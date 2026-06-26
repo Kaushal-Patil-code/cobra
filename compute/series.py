@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime
-from typing import List
+from typing import Dict, List, Sequence
 
 from db.db import get_conn
 from schemas.market import MonitoredStrike, SnapshotPoint
@@ -58,3 +58,31 @@ def read_oi_series(
         )
         rows = cur.fetchall()
     return [SnapshotPoint(ts=r["ts"], oi=r["oi"]) for r in rows]
+
+
+def read_latest_oi(
+    index_name: str, option_type: str, expiry: date,
+    strikes: Sequence[int], since: datetime,
+) -> Dict[int, int]:
+    """Latest OI per strike for a set of strikes (one query) — for wall strength.
+
+    Returns {strike: latest_oi} for the most recent snapshot of each strike with
+    ts >= since. Used to size the wall against the whole ladder (dominance).
+    """
+    if not strikes:
+        return {}
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT ON (strike) strike, oi
+            FROM snapshots
+            WHERE index_name = %s
+              AND option_type = %s
+              AND expiry = %s
+              AND strike = ANY(%s)
+              AND ts >= %s
+            ORDER BY strike, ts DESC
+            """,
+            (index_name, option_type, expiry, list(strikes), since),
+        )
+        return {r["strike"]: r["oi"] for r in cur.fetchall()}

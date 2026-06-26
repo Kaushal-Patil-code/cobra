@@ -19,8 +19,8 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Dict, Optional
 
 from compute.expiry import assess_from_dates
-from compute.metrics import ladder_broken
-from compute.series import read_monitored_strikes, read_oi_series
+from compute.metrics import dominance_strength, ladder_broken
+from compute.series import read_latest_oi, read_monitored_strikes, read_oi_series
 from compute.verdict import build_wall_signal, side_verdict, strike_signal
 from config.thresholds import (
     DEFAULT_WINDOW_MINUTES,
@@ -38,8 +38,9 @@ IST = timezone(timedelta(hours=5, minutes=30))
 _SIDE_ORDER = {"CAP": 0, "FLOOR": 1}   # CAP (resistance) first
 
 
-def _index_wall(ms: MonitoredStrike, now: datetime, window: int) -> WallSignal:
-    """Score every monitored strike of one index/zone and build its WallSignal."""
+def _index_wall(ms: MonitoredStrike, now: datetime, window: int, ladder=None) -> WallSignal:
+    """Score the monitored strikes of one index/side, build its WallSignal, and
+    attach wall STRENGTH (dominance over the full ladder, if we have it)."""
     since = now - timedelta(minutes=SERIES_LOOKBACK_MINUTES)
     signals = {
         strike: strike_signal(
@@ -49,7 +50,17 @@ def _index_wall(ms: MonitoredStrike, now: datetime, window: int) -> WallSignal:
         )
         for strike in ms.monitored
     }
-    return build_wall_signal(ms, signals)
+    ws = build_wall_signal(ms, signals)
+
+    # Strength: size the wall against the whole 8-rung ladder (dominance).
+    if ladder is not None and ladder.strikes:
+        oi_by_strike = read_latest_oi(
+            ms.index_name, ms.option_type, ms.expiry, ladder.strikes, since
+        )
+        wall_oi = oi_by_strike.get(ms.wall_strike)
+        others = [oi for s, oi in oi_by_strike.items() if s != ms.wall_strike]
+        ws.dominance, ws.strength = dominance_strength(wall_oi, others)
+    return ws
 
 
 def build_state(
@@ -107,9 +118,12 @@ def build_state(
         if nifty_ms is None:
             logger.warning("side %s has no NIFTY wall — skipping", side)
             continue
-        nifty_wall = _index_wall(nifty_ms, now, window_minutes)
+        nifty_wall = _index_wall(nifty_ms, now, window_minutes, ladders.get("NIFTY"))
         sensex_ms = idx.get("SENSEX")
-        sensex_wall = _index_wall(sensex_ms, now, window_minutes) if sensex_ms else None
+        sensex_wall = (
+            _index_wall(sensex_ms, now, window_minutes, ladders.get("SENSEX"))
+            if sensex_ms else None
+        )
         sides.append(side_verdict(side, nifty_wall, sensex_wall, assessment))
 
     return VerdictState(

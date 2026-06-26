@@ -60,6 +60,11 @@ class WallSignal(ApiModel):
     # Neighbor-overtakes-wall flag (v3 §3 migration); detail only, never re-picks.
     migration: Optional[str] = None
     pin: bool = False                        # this index is 0-DTE → EXPIRY/PIN (§4)
+    # Wall SIZE (not change): dominance = wall OI ÷ median of the other ladder
+    # strikes; strength 1 (thin) – 5 (dominant). A wall can be "building but tiny"
+    # (skip) or "flat but huge" (very fade-able) — this is that axis.
+    dominance: Optional[float] = None
+    strength: Optional[int] = None
 
 
 class SideVerdict(ApiModel):
@@ -70,6 +75,7 @@ class SideVerdict(ApiModel):
     wall_strike: Optional[int] = None        # the locked NIFTY wall (primary index)
     verdict: str                             # e.g. "CAP HOLDING", "BREAKOUT", "DIVERGENCE"
     conviction: Conviction
+    action: str = "WAIT"                     # the one-line verb: FADE OK / DON'T FADE / WAIT
     meaning: str                             # trader-facing line from the §5.2 table
     tag: Optional[str] = None                # "EXPIRY/PIN" when an index is 0-DTE (§4)
 
