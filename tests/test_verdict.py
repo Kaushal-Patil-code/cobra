@@ -328,7 +328,12 @@ def test_build_state_attaches_strength_and_action(monkeypatch):
     monitored = [_ms("CAP", "NIFTY", "CE", 24400, 50, nexp),
                  _ms("CAP", "SENSEX", "CE", 78000, 100, sexp)]
     monkeypatch.setattr(engine, "read_monitored_strikes", lambda d: monitored)
-    monkeypatch.setattr(engine, "read_oi_series", lambda i, o, s, e, since: _building_series(1000 + s))
+    # The wall's OI series dominates its ladder (latest ≈7080 vs ≈944) → strength 5;
+    # all rungs build → CAP HOLDING. Strength now derives from the scored series
+    # (read_latest_oi is no longer used by the engine).
+    def _series(i, o, s, e, since):
+        return _building_series(6000 if s == (24400 if i == "NIFTY" else 78000) else 800)
+    monkeypatch.setattr(engine, "read_oi_series", _series)
     monkeypatch.setattr(engine, "read_latest_metrics", lambda d: {})
     monkeypatch.setattr(engine, "get_ladders", lambda d: {
         "NIFTY": Ladder(index_name="NIFTY", expiry=nexp, spot_at_lock=24400.0, atm=24400,
@@ -336,13 +341,46 @@ def test_build_state_attaches_strength_and_action(monkeypatch):
         "SENSEX": Ladder(index_name="SENSEX", expiry=sexp, spot_at_lock=78000.0, atm=78000,
                          interval=100, strikes=[78300, 78200, 78100, 78000, 77900, 77800, 77700, 77600]),
     })
-    # the wall strike dominates its ladder → high strength
-    def _latest(idx, ot, exp, strikes, since):
-        wall = 24400 if idx == "NIFTY" else 78000
-        return {s: (6000 if s == wall else 800) for s in strikes}
-    monkeypatch.setattr(engine, "read_latest_oi", _latest)
-
     state = engine.build_state(trading_date=td, now=NOW, window_minutes=15)
     cap = state.sides[0]
     assert cap.nifty.strength == 5 and cap.nifty.dominance is not None
     assert cap.verdict == "CAP HOLDING" and cap.action == "FADE OK"
+    # the full 8-rung ladder is now scored and attached (descending by strike)
+    assert [s.strike for s in cap.nifty.ladder] == [24550, 24500, 24450, 24400,
+                                                    24350, 24300, 24250, 24200]
+
+
+def test_build_state_pairs_ladders_by_level(monkeypatch):
+    from schemas.market import IndexMetrics, Ladder
+    td = date(2026, 6, 19)
+    nexp, sexp = date(2026, 6, 23), date(2026, 6, 25)
+    monitored = [_ms("CAP", "NIFTY", "CE", 24400, 50, nexp),
+                 _ms("CAP", "SENSEX", "CE", 78100, 100, sexp)]
+    monkeypatch.setattr(engine, "read_monitored_strikes", lambda d: monitored)
+    monkeypatch.setattr(engine, "read_oi_series", lambda i, o, s, e, since: _building_series(1000))
+    # spots → live ratio = 78100 / 24400 ≈ 3.2008 (the pairing axis)
+    monkeypatch.setattr(engine, "read_latest_metrics", lambda d: {
+        "NIFTY": IndexMetrics(index_name="NIFTY", expiry=nexp, spot=24400.0),
+        "SENSEX": IndexMetrics(index_name="SENSEX", expiry=sexp, spot=78100.0),
+    })
+    monkeypatch.setattr(engine, "get_ladders", lambda d: {
+        "NIFTY": Ladder(index_name="NIFTY", expiry=nexp, spot_at_lock=24400.0, atm=24400,
+                        interval=50, strikes=[24550, 24500, 24450, 24400, 24350, 24300, 24250, 24200]),
+        "SENSEX": Ladder(index_name="SENSEX", expiry=sexp, spot_at_lock=78100.0, atm=78100,
+                         interval=100, strikes=[78400, 78300, 78200, 78100, 78000, 77900, 77800, 77700]),
+    })
+
+    state = engine.build_state(trading_date=td, now=NOW, window_minutes=15)
+    assert state.live_ratio == round(78100 / 24400, 4)
+    cap = state.sides[0]
+    # every Nifty ladder rung appears, descending (plus Sensex-only rows under union)
+    assert [r.nifty.strike for r in cap.paired if r.nifty] == [24550, 24500, 24450, 24400,
+                                                               24350, 24300, 24250, 24200]
+    by_n = {r.nifty.strike: r for r in cap.paired if r.nifty}
+    # 24400 × ratio = 78100 exactly → wall↔wall, ALIGNED (both building)
+    assert by_n[24400].sensex.strike == 78100
+    assert by_n[24400].is_wall is True and by_n[24400].agree == "ALIGNED"
+    # 24450 × ratio ≈ 78260 → nearest Sensex 78300 (≤50)
+    assert by_n[24450].sensex.strike == 78300
+    # 24550 × ratio ≈ 78580 → off the top of the Sensex ladder → no level match
+    assert by_n[24550].sensex is None

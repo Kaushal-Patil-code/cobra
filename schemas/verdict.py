@@ -65,6 +65,31 @@ class WallSignal(ApiModel):
     # (skip) or "flat but huge" (very fade-able) — this is that axis.
     dominance: Optional[float] = None
     strength: Optional[int] = None
+    # All 8 spot-anchored ladder rungs of this side's type, scored over the window
+    # (descending by strike, wall flagged). Backs the level-paired table (v3 item 1);
+    # `wall` + `neighbors` remain the subset the verdict math reads.
+    ladder: List[StrikeSignal] = []
+
+
+class PairedRung(ApiModel):
+    """One row of the level-paired ladder table (v3 item 1).
+
+    A NIFTY rung beside the SENSEX rung closest to its level-equivalent
+    (nifty_strike × the LIVE ratio = sensex_spot / nifty_spot). One row per Nifty
+    rung; `sensex` is None when no Sensex rung sits within tolerance of that level or
+    Sensex data is missing. Because the Nifty strike grid is coarser than Sensex's in
+    level-terms (≈160 vs 100 at ratio ~3.20), some Sensex rungs are nearest to no
+    Nifty rung — each is added as a Sensex-only row (`nifty` None) so both full
+    ladders stay visible. `agree` is the at-a-glance cross-check.
+    """
+
+    nifty: Optional[StrikeSignal] = None
+    sensex: Optional[StrikeSignal] = None
+    # both legs moving the same way → ALIGNED; opposite → DIVERGENT; either flat or a
+    # leg absent → None.
+    agree: Optional[Literal["ALIGNED", "DIVERGENT"]] = None
+    is_wall: bool = False                    # either leg is its index's wall
+    level_gap: Optional[int] = None          # |sensex_strike − nifty_strike×ratio|, rounded
 
 
 class SideVerdict(ApiModel):
@@ -88,6 +113,9 @@ class SideVerdict(ApiModel):
 
     nifty: WallSignal
     sensex: Optional[WallSignal] = None
+    # Level-paired ladder rows for this side (Nifty rung ↔ closest Sensex rung by
+    # level), built from the two `WallSignal.ladder`s. Display only (v3 item 1).
+    paired: List[PairedRung] = []
 
 
 class VerdictState(ApiModel):
@@ -97,6 +125,9 @@ class VerdictState(ApiModel):
     trading_date: date
     weekday: str                             # 'Mon'..'Fri' (DTE bucketing, v3 §4)
     window_minutes: int
+    # Live Sensex/Nifty spot ratio used for level-pairing (~3.20); None if a spot
+    # is missing. Surfaced so the dashboard shows the exact ratio used (v3 item 1).
+    live_ratio: Optional[float] = None
     expiry: Optional[ExpiryAssessment] = None  # None until walls are locked
     metrics: List[IndexMetrics] = []         # max-pain + PCR per index (v3 §6)
     range_broken: List[IndexName] = []       # indices whose spot left the ladder (§3)

@@ -20,7 +20,8 @@ from typing import Dict, Optional
 
 from compute.expiry import assess_from_dates
 from compute.metrics import dominance_strength, ladder_broken
-from compute.series import read_latest_oi, read_monitored_strikes, read_oi_series
+from compute.pairing import pair_ladders_by_level
+from compute.series import read_monitored_strikes, read_oi_series
 from compute.verdict import build_wall_signal, side_verdict, strike_signal
 from config.thresholds import (
     DEFAULT_WINDOW_MINUTES,
@@ -39,24 +40,33 @@ _SIDE_ORDER = {"CAP": 0, "FLOOR": 1}   # CAP (resistance) first
 
 
 def _index_wall(ms: MonitoredStrike, now: datetime, window: int, ladder=None) -> WallSignal:
-    """Score the monitored strikes of one index/side, build its WallSignal, and
-    attach wall STRENGTH (dominance over the full ladder, if we have it)."""
+    """Score this index/side's strikes, build its WallSignal, and attach the full
+    scored ladder (for the level-paired table) + wall STRENGTH (dominance)."""
     since = now - timedelta(minutes=SERIES_LOOKBACK_MINUTES)
+    # Score the monitored set (wall + neighbors — what the verdict reads) PLUS every
+    # ladder rung (what the level-paired table needs). Union → a shared strike is
+    # read once; a monitored neighbor off the ladder edge is still scored.
+    to_score = list(ms.monitored)
+    if ladder is not None and ladder.strikes:
+        to_score += [s for s in ladder.strikes if s not in to_score]
     signals = {
         strike: strike_signal(
             ms.index_name, ms.option_type, strike, ms.expiry,
             read_oi_series(ms.index_name, ms.option_type, strike, ms.expiry, since),
             now, window, is_wall=(strike == ms.wall_strike),
         )
-        for strike in ms.monitored
+        for strike in to_score
     }
     ws = build_wall_signal(ms, signals)
 
-    # Strength: size the wall against the whole 8-rung ladder (dominance).
+    # Full scored ladder (descending by strike) + wall STRENGTH (dominance over the
+    # ladder), both from the OI we just scored — no extra query.
     if ladder is not None and ladder.strikes:
-        oi_by_strike = read_latest_oi(
-            ms.index_name, ms.option_type, ms.expiry, ladder.strikes, since
-        )
+        ws.ladder = [signals[s] for s in sorted(ladder.strikes, reverse=True)]
+        oi_by_strike = {
+            s: signals[s].oi_latest for s in ladder.strikes
+            if signals[s].oi_latest is not None
+        }
         wall_oi = oi_by_strike.get(ms.wall_strike)
         others = [oi for s, oi in oi_by_strike.items() if s != ms.wall_strike]
         ws.dominance, ws.strength = dominance_strength(wall_oi, others)
@@ -106,6 +116,16 @@ def build_state(
         and ladder_broken(m.spot, lad.strikes)
     ]
 
+    # Live Sensex/Nifty ratio (≈3.20) from the two spots — used to pair strikes by
+    # LEVEL (Nifty × ratio) and shown so the dashboard reflects the exact ratio used.
+    n_m = metrics_by_index.get("NIFTY")
+    s_m = metrics_by_index.get("SENSEX")
+    nspot = n_m.spot if n_m else None
+    sspot = s_m.spot if s_m else None
+    live_ratio = round(sspot / nspot, 4) if (nspot and sspot) else None
+    sensex_ladder = ladders.get("SENSEX")
+    sensex_interval = sensex_ladder.interval if sensex_ladder else 100
+
     # side -> {index_name: MonitoredStrike}
     by_side: Dict[str, Dict[str, MonitoredStrike]] = defaultdict(dict)
     for m in monitored:
@@ -124,10 +144,19 @@ def build_state(
             _index_wall(sensex_ms, now, window_minutes, ladders.get("SENSEX"))
             if sensex_ms else None
         )
-        sides.append(side_verdict(side, nifty_wall, sensex_wall, assessment))
+        sv = side_verdict(side, nifty_wall, sensex_wall, assessment)
+        # Pair the two scored ladders by level (Nifty rung ↔ closest Sensex rung).
+        sv.paired = pair_ladders_by_level(
+            nifty_wall.ladder,
+            sensex_wall.ladder if sensex_wall else [],
+            live_ratio,
+            sensex_interval,
+        )
+        sides.append(sv)
 
     return VerdictState(
-        **base, expiry=assessment, metrics=list(metrics_by_index.values()),
+        **base, live_ratio=live_ratio, expiry=assessment,
+        metrics=list(metrics_by_index.values()),
         range_broken=range_broken, sides=sides,
     )
 
