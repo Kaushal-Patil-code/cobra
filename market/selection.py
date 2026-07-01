@@ -1,11 +1,14 @@
-"""v3 item 3 — dynamic ladder + CAP/FLOOR wall refresh (§3).
+"""v4 — dynamic wall detection + CAP/FLOOR wall refresh (§3).
 
-Per tick (NOT lock-once): re-center each index's ladder on live spot, then re-pick
-its CAP (highest CE OI at/above spot) and FLOOR (highest PE OI at/below spot) walls
-from current OI — with hysteresis (WALL_STICKY_MARGIN) so the wall doesn't flip on
-tiny ties. The ladder and the walls are UPSERTed (one mutable row per
-day/index/expiry), so a rolled expiry starts fresh on the new chain. No human zone
-input. `lock_walls` keeps its name for callers but now *refreshes* every tick.
+Per tick (NOT lock-once): re-center each index's DISPLAY ladder on live spot, then
+re-pick its CAP/FLOOR walls by WIDE-SCANNING the full chain in a spot window —
+CAP = max CE OI in [spot, spot+reach], FLOOR = max PE OI in [spot-reach, spot] — so a
+dominant wall beyond the 8 visible rungs is still found. `reach` is per index
+(NIFTY = WALL_SCAN_REACH_POINTS; SENSEX scaled by the live ratio). Held with
+hysteresis (WALL_STICKY_MARGIN) so the wall doesn't flip on tiny ties, and a
+`broken_level` is tracked when spot crosses the wall (sticky BROKEN badge). The ladder
+and the walls are UPSERTed (one mutable row per day/index/expiry), so a rolled expiry
+starts fresh on the new chain. No human zone input; `lock_walls` refreshes every tick.
 """
 from __future__ import annotations
 

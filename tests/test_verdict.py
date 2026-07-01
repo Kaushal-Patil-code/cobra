@@ -373,6 +373,7 @@ def test_build_state_flags_off_ladder_wall_and_callout(monkeypatch):
     assert cap.nifty.strength is not None            # off-ladder wall STILL gets a strength (dominance fix)
     assert cap.wall_callout is not None
     assert cap.wall_callout.nifty.strike == 24700
+    assert cap.wall_callout.sensex.strike == 78500   # both legs off-ladder → both filled
 
 
 def test_build_state_pairs_ladders_by_level(monkeypatch):
