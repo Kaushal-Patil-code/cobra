@@ -1,126 +1,127 @@
-"""v3 — lock orchestration: spot-anchored ladders + CAP/FLOOR walls (§3).
+"""v3 item 3 — dynamic ladder + CAP/FLOOR wall refresh (§3).
 
-Per tick (idempotent): build each index's ladder from live spot, persist it, then
-lock the CAP (highest CE OI) and FLOOR (highest PE OI) walls of that ladder. There
-is no human zone input. Reuses an existing lock for the same
-`(side, index, expiry)`; a rolled expiry has no such row, so it locks fresh on the
-new chain. INSERT … ON CONFLICT DO NOTHING makes concurrent lockers safe.
+Per tick (NOT lock-once): re-center each index's ladder on live spot, then re-pick
+its CAP (highest CE OI at/above spot) and FLOOR (highest PE OI at/below spot) walls
+from current OI — with hysteresis (WALL_STICKY_MARGIN) so the wall doesn't flip on
+tiny ties. The ladder and the walls are UPSERTed (one mutable row per
+day/index/expiry), so a rolled expiry starts fresh on the new chain. No human zone
+input. `lock_walls` keeps its name for callers but now *refreshes* every tick.
 """
 from __future__ import annotations
 
 import logging
 from datetime import date
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
-from compute.strikes import plan_ladders, plan_locks
+from compute.strikes import plan_ladders, select_index_walls
+from config.thresholds import WALL_STICKY_MARGIN
 from db.db import get_conn
 from market.fetch import fetch_chains
 from market.instruments import all_instruments
-from market.ladders import insert_ladders
-from schemas.market import ChainSnapshot, Instrument, Ladder
-from schemas.strikes import WallSelection
+from market.ladders import upsert_ladders
+from schemas.market import ChainSnapshot
 
 logger = logging.getLogger(__name__)
 
 SIDES = ("CAP", "FLOOR")
 
 
-def get_locked_keys(trading_date: date) -> set:
-    """Set of (side, index_name, expiry) walls already locked for the day."""
+def read_incumbent_walls(trading_date: date) -> Dict[Tuple[str, str, date], int]:
+    """{(side, index_name, expiry): wall_strike} — last tick's walls (for stickiness)."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT side, index_name, expiry FROM monitored_strikes WHERE trading_date = %s",
+            "SELECT side, index_name, expiry, wall_strike "
+            "FROM monitored_strikes WHERE trading_date = %s",
             (trading_date,),
         )
-        return {(r["side"], r["index_name"], r["expiry"]) for r in cur.fetchall()}
+        return {
+            (r["side"], r["index_name"], r["expiry"]): r["wall_strike"]
+            for r in cur.fetchall()
+        }
 
 
-def _insert_lock(cur, trading_date: date, side: str, sel: WallSelection) -> int:
+_UPSERT_WALL = """
+INSERT INTO monitored_strikes
+    (trading_date, side, index_name, option_type, expiry,
+     wall_strike, monitored, wall_oi_at_lock)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+ON CONFLICT (trading_date, side, index_name, expiry) DO UPDATE
+    SET option_type     = EXCLUDED.option_type,
+        wall_strike     = EXCLUDED.wall_strike,
+        monitored       = EXCLUDED.monitored,
+        wall_oi_at_lock = EXCLUDED.wall_oi_at_lock,
+        locked_at       = now()
+    WHERE monitored_strikes.wall_strike IS DISTINCT FROM EXCLUDED.wall_strike
+"""
+
+
+def _upsert_wall(cur, trading_date: date, side: str, sel) -> int:
     cur.execute(
-        """
-        INSERT INTO monitored_strikes
-            (trading_date, side, index_name, option_type, expiry,
-             wall_strike, monitored, wall_oi_at_lock)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (trading_date, side, index_name, expiry) DO NOTHING
-        """,
+        _UPSERT_WALL,
         (trading_date, side, sel.index_name, sel.option_type, sel.expiry,
          sel.wall_strike, sel.monitored, sel.wall_oi),
     )
-    return cur.rowcount  # 1 = inserted, 0 = already locked (ON CONFLICT)
-
-
-def _warn_unlockable(
-    chains: Dict[str, ChainSnapshot],
-    instruments: Dict[str, Instrument],
-    ladders: Dict[str, Ladder],
-    coverable: set,
-) -> None:
-    """Surface any (index, side) we have a chain for but couldn't lock (spec §11)."""
-    for name, chain in chains.items():
-        if name not in instruments:
-            continue
-        if name not in ladders:
-            logger.warning(
-                "no ladder for %s (no live spot in the chain?) — cannot lock walls", name
-            )
-            continue
-        for side in SIDES:
-            if (side, name, chain.expiry) not in coverable:
-                logger.warning(
-                    "could not lock %s %s on expiry %s — wall strike fell outside the "
-                    "fetched chain; widen strikecount or use the depth() fallback",
-                    name, side, chain.expiry,
-                )
+    return cur.rowcount  # 1 = newly created or moved, 0 = sticky hold (unchanged)
 
 
 def lock_walls(trading_date: date, chains: Dict[str, ChainSnapshot]) -> List[dict]:
-    """Lock ladders + CAP/FLOOR walls for each index against the given chains."""
+    """Re-center ladders + re-pick CAP/FLOOR walls (sticky) for each index, this tick.
+
+    Returns only the walls that CHANGED this tick (a new pick or a move); a sticky
+    hold is a no-op and is not returned. `build_state` reads the freshly-UPSERTed
+    rows regardless, so an empty return just means nothing moved.
+    """
     instruments = all_instruments()
-    ladders = plan_ladders(chains, instruments)
+    ladders = plan_ladders(chains, instruments)   # re-centered on current spot
     if not ladders:
-        logger.warning("no ladders to lock for %s (no live spot?)", trading_date)
+        logger.warning("no ladders to refresh for %s (no live spot?)", trading_date)
         return []
 
-    insert_ladders(trading_date, list(ladders.values()))   # idempotent (ON CONFLICT)
+    upsert_ladders(trading_date, list(ladders.values()))
+    incumbents = read_incumbent_walls(trading_date)
 
-    already = get_locked_keys(trading_date)
-    planned = plan_locks(chains, ladders, already)
-
-    coverable = already | {(side, sel.index_name, sel.expiry) for side, sel in planned}
-    _warn_unlockable(chains, instruments, ladders, coverable)
-
-    if not planned:
-        logger.info("walls already locked for %s (nothing new)", trading_date)
-        return []
-
-    locked = []  # only rows this call actually inserted (accurate under races)
+    changed: List[dict] = []
     with get_conn() as conn, conn.cursor() as cur:
-        for side, sel in planned:
-            if _insert_lock(cur, trading_date, side, sel):
-                locked.append((side, sel))
-                logger.info(
-                    "locked %s %s wall=%s monitored=%s (expiry %s)",
-                    sel.index_name, side, sel.wall_strike, sel.monitored, sel.expiry,
-                )
-
-    return [
-        {
-            "side": side, "index": sel.index_name, "option_type": sel.option_type,
-            "wall": sel.wall_strike, "monitored": sel.monitored, "expiry": str(sel.expiry),
-        }
-        for side, sel in locked
-    ]
+        for name, chain in chains.items():
+            ladder = ladders.get(name)
+            if ladder is None:
+                logger.warning("no ladder for %s (no live spot?) — cannot pick walls", name)
+                continue
+            inc: Dict[str, Optional[int]] = {
+                s: incumbents.get((s, name, chain.expiry)) for s in SIDES
+            }
+            sels = select_index_walls(chain, ladder, inc, WALL_STICKY_MARGIN)
+            for side in SIDES:
+                sel = sels.get(side)
+                if sel is None:
+                    logger.warning(
+                        "could not pick %s %s on expiry %s — no %s OI at/%s spot on the ladder",
+                        name, side, chain.expiry,
+                        "CE" if side == "CAP" else "PE",
+                        "above" if side == "CAP" else "below",
+                    )
+                    continue
+                if _upsert_wall(cur, trading_date, side, sel):
+                    changed.append({
+                        "side": side, "index": sel.index_name,
+                        "option_type": sel.option_type, "wall": sel.wall_strike,
+                        "monitored": sel.monitored, "expiry": str(sel.expiry),
+                    })
+                    logger.info(
+                        "refreshed %s %s wall=%s monitored=%s (expiry %s)",
+                        sel.index_name, side, sel.wall_strike, sel.monitored, sel.expiry,
+                    )
+    return changed
 
 
 def lock_session(trading_date: date, strikecount: int = 10) -> List[dict]:
-    """Fetch both chains and lock ladders + walls for the session."""
+    """Fetch both chains and refresh ladders + walls for this session tick."""
     from auth import get_fyers_client
 
     try:
         client = get_fyers_client()
     except Exception as exc:
-        logger.error("auth failed — cannot lock session: %s", exc)
+        logger.error("auth failed — cannot refresh session: %s", exc)
         return []
     chains = fetch_chains(client, strikecount=strikecount)
     return lock_walls(trading_date, chains)

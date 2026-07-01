@@ -1,7 +1,7 @@
-"""v3 — lock planning (pure): ladders + CAP/FLOOR walls, incl. expiry-roll re-lock."""
+"""v3 — ladder planning (pure): spot-anchored ladders per index, re-centered each tick."""
 from datetime import date, datetime, timezone
 
-from compute.strikes import plan_ladders, plan_locks
+from compute.strikes import plan_ladders, select_index_walls
 from schemas.market import ChainSnapshot, Instrument, StrikeOI
 
 TS = datetime(2026, 6, 18, tzinfo=timezone.utc)
@@ -48,28 +48,19 @@ def test_plan_ladders_skips_index_without_spot():
     assert plan_ladders({"NIFTY": ch}, INSTR) == {}
 
 
-def test_plan_locks_both_sides_both_indices_when_none_locked():
+def test_select_index_walls_picks_spot_side_walls():
+    # CAP = max CE OI at/above spot (24350), FLOOR = max PE OI at/below spot (24200).
     chains = {"NIFTY": _nifty(), "SENSEX": _sensex()}
     ladders = plan_ladders(chains, INSTR)
-    planned = plan_locks(chains, ladders, set())
-    got = {(side, sel.index_name): sel.wall_strike for side, sel in planned}
-    assert got[("CAP", "NIFTY")] == 24350 and got[("FLOOR", "NIFTY")] == 24200
-    assert got[("CAP", "SENSEX")] == 77600 and got[("FLOOR", "SENSEX")] == 77200
-    assert len(planned) == 4
+    n = select_index_walls(_nifty(), ladders["NIFTY"])
+    s = select_index_walls(_sensex(), ladders["SENSEX"])
+    assert n["CAP"].wall_strike == 24350 and n["FLOOR"].wall_strike == 24200
+    assert s["CAP"].wall_strike == 77600 and s["FLOOR"].wall_strike == 77200
 
 
-def test_plan_locks_skips_already_locked():
-    chains = {"NIFTY": _nifty()}
-    ladders = plan_ladders(chains, INSTR)
-    already = {("CAP", "NIFTY", NIFTY_EXP)}
-    planned = plan_locks(chains, ladders, already)
-    assert {side for side, _ in planned} == {"FLOOR"}
-
-
-def test_plan_locks_relocks_on_expiry_roll():
-    rolled = date(2026, 6, 30)                       # new nearest Nifty expiry
-    chains = {"NIFTY": _nifty(expiry=rolled)}
-    ladders = plan_ladders(chains, INSTR)
-    already = {("CAP", "NIFTY", NIFTY_EXP), ("FLOOR", "NIFTY", NIFTY_EXP)}  # old expiry locked
-    planned = plan_locks(chains, ladders, already)
-    assert len(planned) == 2 and all(sel.expiry == rolled for _, sel in planned)
+def test_select_index_walls_holds_incumbent_within_margin():
+    # incumbent CAP 24400 (300) vs challenger 24350 (900): 900 ≥ 300×1.15 → moves.
+    # incumbent CAP 24350 (900) vs same chain: it IS the challenger → stays.
+    ladders = plan_ladders({"NIFTY": _nifty()}, INSTR)
+    held = select_index_walls(_nifty(), ladders["NIFTY"], {"CAP": 24350}, sticky_margin=0.15)
+    assert held["CAP"].wall_strike == 24350

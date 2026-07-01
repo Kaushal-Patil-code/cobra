@@ -1,9 +1,12 @@
-"""v3 — persist & read the locked spot-anchored ladders (the `ladders` table, §3).
+"""v3 item 3 — persist & read the spot-anchored ladders (the `ladders` table, §3).
 
-One ladder per index per expiry, locked at session start so each rung has a clean
-OI series. Keyed by `(trading_date, index_name, expiry)`: a rolled expiry has no
-row → it locks fresh on the new chain (same expiry-roll behaviour as the walls).
-INSERT … ON CONFLICT DO NOTHING makes concurrent lockers safe — first one wins.
+One mutable ladder per index per expiry, RE-CENTERED on live spot each tick. Keyed
+by `(trading_date, index_name, expiry)`: a rolled expiry has no row → it's created
+fresh on the new chain. UPSERT … DO UPDATE … WHERE strikes changed: the row is
+rewritten only when spot has drifted enough to shift the ladder, so a quiet tick is a
+no-op. `snapshots` stores the whole chain, so a shifted rung still has a clean OI
+series. (`spot_at_lock`/`locked_at` keep their names but now hold the spot and time at
+the last re-center.)
 """
 from __future__ import annotations
 
@@ -16,11 +19,17 @@ from schemas.market import Ladder
 
 logger = logging.getLogger(__name__)
 
-_INSERT = """
+_UPSERT = """
 INSERT INTO ladders
     (trading_date, index_name, expiry, spot_at_lock, atm, interval, strikes)
 VALUES (%s, %s, %s, %s, %s, %s, %s)
-ON CONFLICT (trading_date, index_name, expiry) DO NOTHING
+ON CONFLICT (trading_date, index_name, expiry) DO UPDATE
+    SET spot_at_lock = EXCLUDED.spot_at_lock,
+        atm          = EXCLUDED.atm,
+        interval     = EXCLUDED.interval,
+        strikes      = EXCLUDED.strikes,
+        locked_at    = now()
+    WHERE ladders.strikes IS DISTINCT FROM EXCLUDED.strikes
 """
 
 
@@ -34,29 +43,26 @@ def get_locked_ladder_keys(trading_date: date) -> set:
         return {(r["index_name"], r["expiry"]) for r in cur.fetchall()}
 
 
-def insert_ladders(trading_date: date, ladders: List[Ladder]) -> int:
-    """Persist newly built ladders; returns the number actually inserted.
-
-    Existing (trading_date, index_name, expiry) rows are left untouched (locked),
-    so this is idempotent and safe to call every tick.
-    """
+def upsert_ladders(trading_date: date, ladders: List[Ladder]) -> int:
+    """Re-center the day's ladders (UPSERT). Returns how many were created or shifted
+    this tick; an unchanged ladder (spot hasn't crossed to a new ATM) is a no-op."""
     if not ladders:
         return 0
-    inserted = 0
+    changed = 0
     with get_conn() as conn, conn.cursor() as cur:
         for lad in ladders:
             cur.execute(
-                _INSERT,
+                _UPSERT,
                 (trading_date, lad.index_name, lad.expiry, lad.spot_at_lock,
                  lad.atm, lad.interval, lad.strikes),
             )
             if cur.rowcount:
-                inserted += 1
+                changed += 1
                 logger.info(
-                    "locked %s ladder atm=%s strikes=%s (expiry %s)",
+                    "re-centered %s ladder atm=%s strikes=%s (expiry %s)",
                     lad.index_name, lad.atm, lad.strikes, lad.expiry,
                 )
-    return inserted
+    return changed
 
 
 def get_ladders(trading_date: date) -> Dict[str, Ladder]:

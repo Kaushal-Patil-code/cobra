@@ -123,8 +123,6 @@ def build_state(
     nspot = n_m.spot if n_m else None
     sspot = s_m.spot if s_m else None
     live_ratio = round(sspot / nspot, 4) if (nspot and sspot) else None
-    sensex_ladder = ladders.get("SENSEX")
-    sensex_interval = sensex_ladder.interval if sensex_ladder else 100
 
     # side -> {index_name: MonitoredStrike}
     by_side: Dict[str, Dict[str, MonitoredStrike]] = defaultdict(dict)
@@ -150,7 +148,6 @@ def build_state(
             nifty_wall.ladder,
             sensex_wall.ladder if sensex_wall else [],
             live_ratio,
-            sensex_interval,
         )
         sides.append(sv)
 

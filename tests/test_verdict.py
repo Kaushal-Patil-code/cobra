@@ -125,14 +125,13 @@ def test_build_wall_signal_flags_neighbor_migration():
 # --- dual-index verdict per side (§5.2) ------------------------------------
 
 def _assess(dte_n=4, dte_s=6, nifty_pin=False, sensex_pin=False, sensex_missing=False,
-            low_weight=False, sensex=True, label="cross-check active"):
+            sensex=True, label="cross-check active"):
     nx = IndexExpiry(index_name="NIFTY", expiry=date(2026, 6, 23), dte=dte_n,
                      is_expiry_day=(dte_n == 0), near_expiry=(dte_n == 1))
     sx = (IndexExpiry(index_name="SENSEX", expiry=date(2026, 6, 25), dte=dte_s,
                       is_expiry_day=(dte_s == 0), near_expiry=(dte_s == 1)) if sensex else None)
     return ExpiryAssessment(nifty=nx, sensex=sx, sensex_missing=sensex_missing,
-                            nifty_pin=nifty_pin, sensex_pin=sensex_pin,
-                            low_weight=low_weight, label=label)
+                            nifty_pin=nifty_pin, sensex_pin=sensex_pin, label=label)
 
 
 def _wall(index, state, magnitude="signal", streak=3, trend=None, oi=1000, strike=24400, ot="CE"):
@@ -376,11 +375,12 @@ def test_build_state_pairs_ladders_by_level(monkeypatch):
     # every Nifty ladder rung appears, descending (plus Sensex-only rows under union)
     assert [r.nifty.strike for r in cap.paired if r.nifty] == [24550, 24500, 24450, 24400,
                                                                24350, 24300, 24250, 24200]
-    by_n = {r.nifty.strike: r for r in cap.paired if r.nifty}
+    by_n = {r.nifty.strike: r for r in cap.paired}
+    assert all(r.sensex is not None for r in cap.paired)   # nearest match → no blanks
     # 24400 × ratio = 78100 exactly → wall↔wall, ALIGNED (both building)
     assert by_n[24400].sensex.strike == 78100
     assert by_n[24400].is_wall is True and by_n[24400].agree == "ALIGNED"
-    # 24450 × ratio ≈ 78260 → nearest Sensex 78300 (≤50)
+    # 24450 × ratio ≈ 78260 → nearest Sensex 78300
     assert by_n[24450].sensex.strike == 78300
-    # 24550 × ratio ≈ 78580 → off the top of the Sensex ladder → no level match
-    assert by_n[24550].sensex is None
+    # 24550 × ratio ≈ 78580 → off the top → filled with the nearest edge rung 78400
+    assert by_n[24550].sensex.strike == 78400

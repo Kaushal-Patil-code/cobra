@@ -77,7 +77,9 @@ class ExpiryAssessment(ApiModel):
 
     - sensex_missing: Sensex fetch/token failure → NIFTY-ONLY row.
     - nifty_pin / sensex_pin: that index is 0-DTE → EXPIRY/PIN guard applies.
-    - low_weight: either index is 1-DTE → still compute, flag reduced confidence.
+
+    Near-expiry (1-DTE) gets no special "low weight" downgrade — each index's DTE and
+    expiry DATE are simply reported (see IndexExpiry.near_expiry / .dte).
     """
 
     nifty: IndexExpiry
@@ -85,7 +87,6 @@ class ExpiryAssessment(ApiModel):
     sensex_missing: bool
     nifty_pin: bool
     sensex_pin: bool
-    low_weight: bool
     label: str
 
 

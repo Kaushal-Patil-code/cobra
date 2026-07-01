@@ -78,6 +78,9 @@ def test_dominance_strength():
     # None peers are ignored
     dom2, s2 = dominance_strength(900, [None, 600, None, 300])  # median(600,300)=450 → 2.0 → 3
     assert s2 == 3
+    # extreme dominance is clamped to fit numeric(8,2); strength still saturates at 5
+    dom3, s3 = dominance_strength(12_000_000, [1, 2, 5, 10, 50, 100, 200])  # median 10 → 1.2M
+    assert dom3 == 999999.99 and s3 == 5
 
 
 def test_index_metrics_from_chain():

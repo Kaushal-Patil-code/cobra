@@ -19,13 +19,15 @@ EXP = date(2026, 6, 23)
 # Writable columns persist_state must produce (matches verdict_store insert order).
 WRITABLE = {"ts", "trading_date", "weekday", "window_minutes", "side", "option_type",
             "wall_strike", "verdict", "conviction", "meaning", "tag", "nifty_sig",
-            "sensex_sig", "dte_n", "dte_s", "suppressed", "expiry_label"}
+            "sensex_sig", "dte_n", "dte_s", "suppressed", "expiry_label",
+            "nifty_strength", "nifty_dominance", "sensex_strength", "sensex_dominance"}
 
 
 def _wall(index, ot="CE"):
     sig = StrikeSignal(index_name=index, option_type=ot, strike=24400, expiry=EXP,
                        is_wall=True, direction="up", magnitude="signal", streak=3, trend=True)
-    return WallSignal(index_name=index, state="building", wall=sig, summary="building/signal/streak3")
+    return WallSignal(index_name=index, state="building", wall=sig,
+                      summary="building/signal/streak3", strength=4, dominance=3.33)
 
 
 def _side(side, ot, verdict="CAP HOLDING", conv="HIGH", suppressed=False, sensex=True, tag=None):
@@ -61,6 +63,9 @@ def test_persist_state_writes_one_row_per_side(monkeypatch):
     cap = next(r for r in rows if r["side"] == "CAP")
     assert cap["option_type"] == "CE" and cap["verdict"] == "CAP HOLDING"
     assert cap["dte_s"] == 6 and cap["wall_strike"] == 24400
+    # wall strength (size axis) is logged per index for tuning
+    assert cap["nifty_strength"] == 4 and cap["nifty_dominance"] == 3.33
+    assert cap["sensex_strength"] == 4 and cap["sensex_dominance"] == 3.33
 
 
 def test_persist_state_records_pin_tag_and_nifty_only(monkeypatch):
@@ -72,6 +77,7 @@ def test_persist_state_records_pin_tag_and_nifty_only(monkeypatch):
     row = captured["rows"][0]
     assert row["suppressed"] is True and row["sensex_sig"] is None and row["dte_s"] is None
     assert row["tag"] == "EXPIRY/PIN"
+    assert row["nifty_strength"] == 4 and row["sensex_strength"] is None
 
 
 def test_persist_state_empty_sides_writes_nothing(monkeypatch):

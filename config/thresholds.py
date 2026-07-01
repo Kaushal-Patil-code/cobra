@@ -31,6 +31,14 @@ TREND_STREAK = 3
 # move is UNCONFIRMED.
 MIN_CONFIRM_STREAK = 2
 
+# --- v3 item 3: dynamic, spot-anchored wall selection (re-picked each tick) -
+# The ladder re-centers on live spot every tick and the CAP/FLOOR walls are
+# re-picked from current OI (cap = max CE OI at/above spot, floor = max PE OI
+# at/below spot). To avoid flip-flopping on tiny ties, the incumbent wall is held
+# unless a challenger strike's OI beats it by this margin (hysteresis). Ratio-based
+# so it self-adjusts to OI size; tune on logged data (like the strength cutoffs).
+WALL_STICKY_MARGIN = 0.15
+
 # --- Magnitude buckets on |Δ% over window| (spec §5.1) ---------------------
 #   <5%  noise · 5–10% mild · ≥10% signal · ≥20% strong
 MAG_MILD_PCT = 5.0

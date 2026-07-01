@@ -1,17 +1,20 @@
 """v3 — strike selection over the spot-anchored ladder (§3). PURE, no DB.
 
 There are no typed zones anymore. Each index anchors a ladder on its OWN live
-spot (compute.metrics.build_ladder); on that ladder we lock two walls per index:
+spot (compute.metrics.build_ladder); on that ladder we pick two walls per index,
+re-centered + re-picked EACH TICK (v3 item 3):
 
-  CAP   = ladder strike with the highest CE OI   (the resistance the trader fades)
-  FLOOR = ladder strike with the highest PE OI   (the support the trader fades)
+  CAP   = highest CE OI at/above spot   (the resistance the trader fades)
+  FLOOR = highest PE OI at/below spot   (the support the trader fades)
 
-Walls are LOCKED for the session; if OI later migrates to a neighbor,
-`check_migration` FLAGS it — the caller never silently re-picks the wall (§3).
+Re-picked from current OI every tick, but with hysteresis (`sticky_margin`): the
+incumbent wall is held unless a challenger's OI beats it by the margin, so it doesn't
+flip on tiny ties. `check_migration` still flags when a bigger neighbor exists
+despite the sticky hold.
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Optional, Sequence
 
 from compute.metrics import build_ladder, compute_atm
 from schemas.market import ChainSnapshot, Instrument, Ladder, Side, StrikeOI
@@ -28,25 +31,50 @@ def select_wall(
     index_name: str,
     expiry,
     interval: int,
+    spot: float,
+    incumbent: Optional[int] = None,
+    sticky_margin: float = 0.0,
 ) -> Optional[WallSelection]:
-    """Highest-OI ladder strike of the side's option type (CAP→CE, FLOOR→PE).
+    """Highest-OI ladder strike of the side's type, on the correct side of spot.
 
-    Returns None if no strike of that type sits on the ladder in the chain (e.g.
-    the chain's strikecount didn't reach a ladder rung — caller should widen it).
+    CAP fades CALL OI at/above spot (resistance); FLOOR fades PUT OI at/below spot
+    (support). Re-picked each tick but STICKY: the incumbent wall is held unless a
+    challenger's OI beats it by `sticky_margin` (hysteresis vs tiny ties). A forced
+    re-pick happens when the incumbent is no longer eligible — off the re-centered
+    ladder, or now on the wrong side of spot. Returns None if no strike of that type
+    sits on the ladder at/above (CAP) / at/below (FLOOR) spot.
     """
     option_type = SIDE_OPTION[side]
     cands = set(ladder_strikes)
+
+    def _eligible(strike: int) -> bool:
+        if strike not in cands:
+            return False
+        return strike >= spot if side == "CAP" else strike <= spot
+
     oi_by_strike: Dict[int, int] = {
         s.strike: s.oi
         for s in strikes
-        if s.option_type == option_type and s.strike in cands
+        if s.option_type == option_type and _eligible(s.strike)
     }
     if not oi_by_strike:
         return None
 
-    # Highest OI wins; ties break toward the ladder centre (≈ ATM) for determinism.
+    # Challenger = highest OI; ties break toward the ladder centre (≈ ATM).
     centre = (min(ladder_strikes) + max(ladder_strikes)) / 2
-    wall = max(oi_by_strike, key=lambda k: (oi_by_strike[k], -abs(k - centre)))
+    challenger = max(oi_by_strike, key=lambda k: (oi_by_strike[k], -abs(k - centre)))
+
+    # Stickiness: hold the still-eligible incumbent unless the challenger's OI beats
+    # it by the margin — so the wall doesn't flip on tiny ties / noise.
+    wall = challenger
+    if (
+        incumbent is not None
+        and incumbent in oi_by_strike
+        and incumbent != challenger
+        and oi_by_strike[challenger] < oi_by_strike[incumbent] * (1 + sticky_margin)
+    ):
+        wall = incumbent
+
     return WallSelection(
         side=side,
         index_name=index_name,
@@ -60,14 +88,25 @@ def select_wall(
 
 
 def select_index_walls(
-    chain: ChainSnapshot, ladder: Ladder
+    chain: ChainSnapshot,
+    ladder: Ladder,
+    incumbents: Optional[Dict[Side, int]] = None,
+    sticky_margin: float = 0.0,
 ) -> Dict[Side, WallSelection]:
-    """Select both walls (CAP via CE, FLOOR via PE) for one index's ladder."""
+    """Both walls (CAP via CE at/above spot, FLOOR via PE at/below spot), sticky.
+
+    `incumbents` maps side → last tick's wall strike, for the hysteresis. Empty on
+    the first tick / after an expiry roll → fresh picks.
+    """
     out: Dict[Side, WallSelection] = {}
+    if chain.spot is None:
+        return out
+    incumbents = incumbents or {}
     for side in ("CAP", "FLOOR"):
         sel = select_wall(
             chain.strikes, side, ladder.strikes,
             chain.index_name, chain.expiry, ladder.interval,
+            spot=chain.spot, incumbent=incumbents.get(side), sticky_margin=sticky_margin,
         )
         if sel is not None:
             out[side] = sel
@@ -92,29 +131,6 @@ def plan_ladders(
             strikes=build_ladder(chain.spot, inst.strike_interval),
         )
     return out
-
-
-def plan_locks(
-    chains: Dict[str, ChainSnapshot],
-    ladders: Dict[str, Ladder],
-    already_locked: set,
-) -> List[Tuple[Side, WallSelection]]:
-    """Decide which (side, wall) to newly lock — PURE, no DB (v3 §3 + expiry roll).
-
-    For each index with a ladder, select CAP + FLOOR; skip any
-    `(side, index, expiry)` already locked (same-day re-run is a no-op), while a
-    **rolled expiry** has no matching key → it locks fresh on the new chain.
-    """
-    planned: List[Tuple[Side, WallSelection]] = []
-    for name, chain in chains.items():
-        ladder = ladders.get(name)
-        if ladder is None:
-            continue
-        for side, sel in select_index_walls(chain, ladder).items():
-            if (side, name, chain.expiry) in already_locked:
-                continue
-            planned.append((side, sel))
-    return planned
 
 
 def check_migration(sel: WallSelection, current_oi: Dict[int, int]) -> MigrationFlag:

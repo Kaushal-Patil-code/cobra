@@ -74,13 +74,11 @@ class WallSignal(ApiModel):
 class PairedRung(ApiModel):
     """One row of the level-paired ladder table (v3 item 1).
 
-    A NIFTY rung beside the SENSEX rung closest to its level-equivalent
-    (nifty_strike × the LIVE ratio = sensex_spot / nifty_spot). One row per Nifty
-    rung; `sensex` is None when no Sensex rung sits within tolerance of that level or
-    Sensex data is missing. Because the Nifty strike grid is coarser than Sensex's in
-    level-terms (≈160 vs 100 at ratio ~3.20), some Sensex rungs are nearest to no
-    Nifty rung — each is added as a Sensex-only row (`nifty` None) so both full
-    ladders stay visible. `agree` is the at-a-glance cross-check.
+    A NIFTY rung filled with the SENSEX rung closest to its level-equivalent
+    (nifty_strike × the LIVE ratio = sensex_spot / nifty_spot) — nearest match, so
+    every row's cells are filled (no blanks); `level_gap` shows how loose the match
+    is. `sensex` is None only when the ratio / Sensex data is missing (NIFTY-ONLY).
+    `agree` is the at-a-glance cross-check.
     """
 
     nifty: Optional[StrikeSignal] = None
@@ -163,6 +161,10 @@ class VerdictRecord(ApiModel):
     dte_s: Optional[int] = None
     suppressed: bool = False
     expiry_label: Optional[str] = None
+    nifty_strength: Optional[int] = None     # 1–5 wall size (dominance bucket, v3)
+    nifty_dominance: Optional[float] = None  # wall OI ÷ median of the other rungs
+    sensex_strength: Optional[int] = None
+    sensex_dominance: Optional[float] = None
     outcome: Optional[str] = None            # manual label, e.g. 'correct'|'wrong'
     notes: Optional[str] = None
 

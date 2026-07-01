@@ -18,7 +18,6 @@ from schemas.market import ExpiryAssessment, IndexExpiry
 
 # Banner labels (kept here so they're easy to tune / reference in tests).
 LABEL_NIFTY_ONLY = "NIFTY-ONLY — Sensex unavailable"
-LABEL_LOW_WEIGHT = "near-expiry, low weight"
 LABEL_ACTIVE = "cross-check active"
 
 
@@ -49,15 +48,13 @@ def assess(nifty: IndexExpiry, sensex: IndexExpiry | None) -> ExpiryAssessment:
     sensex_missing = sensex is None
     nifty_pin = nifty.is_expiry_day
     sensex_pin = sensex is not None and sensex.is_expiry_day
-    low_weight = nifty.near_expiry or (sensex is not None and sensex.near_expiry)
 
-    # Label priority: data-missing > pin > near-expiry > active.
+    # Label priority: data-missing > pin > active. Near-expiry (1-DTE) no longer gets
+    # a "low weight" downgrade — the banner simply reports each index's expiry DATE.
     if sensex_missing:
         label = LABEL_NIFTY_ONLY
     elif nifty_pin or sensex_pin:
         label = pin_label(nifty_pin, sensex_pin)
-    elif low_weight:
-        label = LABEL_LOW_WEIGHT
     else:
         label = LABEL_ACTIVE
 
@@ -67,7 +64,6 @@ def assess(nifty: IndexExpiry, sensex: IndexExpiry | None) -> ExpiryAssessment:
         sensex_missing=sensex_missing,
         nifty_pin=nifty_pin,
         sensex_pin=sensex_pin,
-        low_weight=low_weight,
         label=label,
     )
 

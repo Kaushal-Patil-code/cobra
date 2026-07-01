@@ -41,6 +41,11 @@ def _row(state: VerdictState, v: SideVerdict) -> dict:
         "dte_s": v.dte_s,
         "suppressed": v.suppressed,
         "expiry_label": v.expiry_label,
+        # Wall strength (size axis) per index — logged to tune the cutoffs on data.
+        "nifty_strength": v.nifty.strength,
+        "nifty_dominance": v.nifty.dominance,
+        "sensex_strength": v.sensex.strength if v.sensex else None,
+        "sensex_dominance": v.sensex.dominance if v.sensex else None,
     }
 
 

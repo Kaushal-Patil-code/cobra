@@ -7,7 +7,6 @@ from datetime import date
 
 from compute.expiry import (
     LABEL_ACTIVE,
-    LABEL_LOW_WEIGHT,
     LABEL_NIFTY_ONLY,
     assess_from_dates,
     days_to_expiry,
@@ -26,14 +25,16 @@ def test_days_to_expiry():
 def test_friday_both_clean():           # Nifty 4, Sensex 6 → active, no pin
     a = assess_from_dates(NIFTY_TUE_1, SENSEX_THU_2, date(2026, 6, 19))
     assert (a.nifty.dte, a.sensex.dte) == (4, 6)
-    assert not a.nifty_pin and not a.sensex_pin and not a.low_weight
+    assert not a.nifty_pin and not a.sensex_pin
     assert not a.sensex_missing and a.label == LABEL_ACTIVE
 
 
-def test_monday_nifty_near_expiry():    # Nifty 1, Sensex 3 → low weight, no pin
+def test_monday_nifty_near_expiry_reports_dates_not_low_weight():   # Nifty 1, Sensex 3
     a = assess_from_dates(NIFTY_TUE_1, SENSEX_THU_2, date(2026, 6, 22))
     assert (a.nifty.dte, a.sensex.dte) == (1, 3)
-    assert not a.nifty_pin and a.low_weight and a.label == LABEL_LOW_WEIGHT
+    # near-expiry gets NO "low weight" label — both expiry dates are simply reported
+    assert not a.nifty_pin and a.label == LABEL_ACTIVE
+    assert a.nifty.expiry == NIFTY_TUE_1 and a.sensex.expiry == SENSEX_THU_2
 
 
 def test_tuesday_nifty_expiry_pins_no_suppression():   # Nifty 0 → pin, runs anyway
@@ -43,10 +44,11 @@ def test_tuesday_nifty_expiry_pins_no_suppression():   # Nifty 0 → pin, runs a
     assert "EXPIRY/PIN" in a.label and "Nifty" in a.label
 
 
-def test_wednesday_sensex_near_expiry():      # Nifty ~6, Sensex 1 → low weight
+def test_wednesday_sensex_near_expiry_reports_dates_not_low_weight():   # Nifty 6, Sensex 1
     a = assess_from_dates(NIFTY_TUE_2, SENSEX_THU_2, date(2026, 6, 24))
     assert (a.nifty.dte, a.sensex.dte) == (6, 1)
-    assert not a.sensex_pin and a.low_weight and a.label == LABEL_LOW_WEIGHT
+    assert not a.sensex_pin and a.label == LABEL_ACTIVE
+    assert a.nifty.expiry == NIFTY_TUE_2 and a.sensex.expiry == SENSEX_THU_2
 
 
 def test_thursday_sensex_expiry_pins():        # Sensex 0 → pin Sensex

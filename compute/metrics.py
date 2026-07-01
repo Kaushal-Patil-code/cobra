@@ -47,7 +47,10 @@ def dominance_strength(
     if med <= 0:
         return (None, 5) if wall_oi > 0 else (None, 1)
     dom = wall_oi / med
-    return round(dom, 2), strength_bucket(dom)
+    # Bucket on the true ratio, but clamp the stored/displayed dominance to fit the
+    # verdicts log's numeric(8,2) column (max 999999.99). Strength already saturates
+    # at 5, so an astronomically dominant wall (median ≈ 0) loses nothing here.
+    return round(min(dom, 999999.99), 2), strength_bucket(dom)
 
 
 def compute_atm(spot: float, interval: int) -> int:

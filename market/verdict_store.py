@@ -12,6 +12,8 @@ import logging
 from datetime import date
 from typing import List, Optional
 
+import psycopg
+
 from db.db import get_conn
 from schemas.verdict import VerdictRecord
 
@@ -19,6 +21,21 @@ logger = logging.getLogger(__name__)
 
 # Writable columns, in fixed order — the INSERT and the value tuple track this.
 _INSERT = """
+INSERT INTO verdicts
+    (ts, trading_date, weekday, window_minutes, side, option_type, wall_strike,
+     verdict, conviction, meaning, tag, nifty_sig, sensex_sig, dte_n, dte_s,
+     suppressed, expiry_label,
+     nifty_strength, nifty_dominance, sensex_strength, sensex_dominance)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+        %s, %s, %s, %s)
+"""
+
+# Fallback for a pre-migration deploy: the 17 core columns only (the first 17 of the
+# value tuple). If db/migrations/v3_wall_strength.sql hasn't been applied yet, the
+# full INSERT raises UndefinedColumn — we degrade to this so core verdict logging
+# survives instead of losing every row until the migration runs.
+_BASE_COLS = 17
+_INSERT_BASE = """
 INSERT INTO verdicts
     (ts, trading_date, weekday, window_minutes, side, option_type, wall_strike,
      verdict, conviction, meaning, tag, nifty_sig, sensex_sig, dte_n, dte_s,
@@ -48,11 +65,22 @@ def insert_verdicts(rows: List[dict]) -> int:
             r["verdict"], r["conviction"], r.get("meaning"), r.get("tag"),
             r.get("nifty_sig"), r.get("sensex_sig"), r.get("dte_n"), r.get("dte_s"),
             r.get("suppressed", False), r.get("expiry_label"),
+            r.get("nifty_strength"), r.get("nifty_dominance"),
+            r.get("sensex_strength"), r.get("sensex_dominance"),
         )
         for r in rows
     ]
-    with get_conn() as conn, conn.cursor() as cur:
-        cur.executemany(_INSERT, values)
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.executemany(_INSERT, values)
+    except psycopg.errors.UndefinedColumn:
+        logger.warning(
+            "verdicts strength columns missing — apply db/migrations/v3_wall_strength.sql; "
+            "logging %d base rows without strength/dominance for now", len(values),
+        )
+        base = [v[:_BASE_COLS] for v in values]
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.executemany(_INSERT_BASE, base)
     logger.info("inserted %d verdict rows", len(values))
     return len(values)
 

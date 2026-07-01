@@ -179,6 +179,13 @@ create table if not exists verdicts (
     dte_s          integer,
     suppressed     boolean     not null default false,         -- NIFTY-ONLY (Sensex data missing)
     expiry_label   text,
+    -- Wall STRENGTH (size axis, not change): dominance = wall OI ÷ median of the
+    -- other ladder rungs, bucketed 1–5. Logged per index so the cutoffs can be
+    -- tuned on real data (§11). CAP rows carry CE-wall strength, FLOOR rows PE.
+    nifty_strength   smallint,
+    nifty_dominance  numeric(8, 2),
+    sensex_strength  smallint,
+    sensex_dominance numeric(8, 2),
     created_at     timestamptz not null default now()
 );
 
