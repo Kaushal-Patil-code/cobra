@@ -110,12 +110,6 @@ def build_state(
 
     # v3 §6/§3 context: latest max-pain/PCR per index + RANGE-BROKEN (spot left ladder).
     metrics_by_index = read_latest_metrics(trading_date)
-    # "Last updated" = the freshest tick that actually stored data (real data time),
-    # not `now`. Derived from the metrics we just read — no extra query.
-    data_ts = max(
-        (m.ts for m in metrics_by_index.values() if m.ts is not None),
-        default=None,
-    )
     ladders = get_ladders(trading_date)
     range_broken = [
         name for name, lad in ladders.items()
@@ -160,7 +154,7 @@ def build_state(
         sides.append(sv)
 
     return VerdictState(
-        **base, data_ts=data_ts, live_ratio=live_ratio, expiry=assessment,
+        **base, live_ratio=live_ratio, expiry=assessment,
         metrics=list(metrics_by_index.values()),
         range_broken=range_broken, sides=sides,
     )
