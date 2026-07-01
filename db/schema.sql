@@ -123,6 +123,7 @@ create table if not exists monitored_strikes (
     wall_strike     integer     not null,
     monitored       integer[]   not null,    -- [wall-interval, wall, wall+interval]
     wall_oi_at_lock bigint,
+    broken_level    integer,                     -- v4: former wall spot cleared (sticky badge)
     locked_at       timestamptz not null default now(),
     unique (trading_date, side, index_name, expiry)
 );

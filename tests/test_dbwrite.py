@@ -61,15 +61,29 @@ def _patch(monkeypatch, module, cur):
     monkeypatch.setattr(module, "get_conn", lambda: FakeConn(cur))
 
 
-def test_read_incumbent_walls_keys_by_side_index_expiry(monkeypatch):
+def test_read_incumbent_walls_keys_and_broken(monkeypatch):
     cur = FakeCursor(fetch=[
-        {"side": "CAP", "index_name": "NIFTY", "expiry": EXP, "wall_strike": 24400},
-        {"side": "FLOOR", "index_name": "SENSEX", "expiry": EXP, "wall_strike": 77200},
+        {"side": "CAP", "index_name": "NIFTY", "expiry": EXP, "wall_strike": 24400, "broken_level": None},
+        {"side": "FLOOR", "index_name": "SENSEX", "expiry": EXP, "wall_strike": 77200, "broken_level": 77300},
     ])
     _patch(monkeypatch, sel, cur)
     got = sel.read_incumbent_walls(TD)
-    # exact key tuple — a wrong key would silently disable stickiness (walls flip)
-    assert got == {("CAP", "NIFTY", EXP): 24400, ("FLOOR", "SENSEX", EXP): 77200}
+    assert got == {("CAP", "NIFTY", EXP): (24400, None),
+                   ("FLOOR", "SENSEX", EXP): (77200, 77300)}
+
+
+def test_read_incumbent_walls_degrades_without_broken_column(monkeypatch):
+    class DegradingCursor(FakeCursor):
+        def execute(self, sql, params=None):
+            if "broken_level" in sql:
+                raise psycopg.errors.UndefinedColumn("no column")
+            super().execute(sql, params)
+    cur = DegradingCursor(fetch=[
+        {"side": "CAP", "index_name": "NIFTY", "expiry": EXP, "wall_strike": 24400},
+    ])
+    _patch(monkeypatch, sel, cur)
+    got = sel.read_incumbent_walls(TD)
+    assert got == {("CAP", "NIFTY", EXP): (24400, None)}
 
 
 def test_upsert_wall_passes_columns_in_order_and_returns_rowcount(monkeypatch):

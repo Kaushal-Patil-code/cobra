@@ -13,6 +13,8 @@ import logging
 from datetime import date
 from typing import Dict, List, Optional, Tuple
 
+import psycopg
+
 from compute.strikes import plan_ladders, select_index_walls
 from config.thresholds import WALL_STICKY_MARGIN
 from db.db import get_conn
@@ -26,18 +28,36 @@ logger = logging.getLogger(__name__)
 SIDES = ("CAP", "FLOOR")
 
 
-def read_incumbent_walls(trading_date: date) -> Dict[Tuple[str, str, date], int]:
-    """{(side, index_name, expiry): wall_strike} — last tick's walls (for stickiness)."""
+def read_incumbent_walls(
+    trading_date: date,
+) -> Dict[Tuple[str, str, date], Tuple[Optional[int], Optional[int]]]:
+    """{(side, index_name, expiry): (wall_strike, broken_level)} — last tick's walls
+    (for stickiness + the sticky BROKEN badge). Degrades to (wall, None) if the
+    broken_level column isn't migrated yet."""
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            "SELECT side, index_name, expiry, wall_strike "
-            "FROM monitored_strikes WHERE trading_date = %s",
-            (trading_date,),
-        )
-        return {
-            (r["side"], r["index_name"], r["expiry"]): r["wall_strike"]
-            for r in cur.fetchall()
-        }
+        try:
+            cur.execute(
+                "SELECT side, index_name, expiry, wall_strike, broken_level "
+                "FROM monitored_strikes WHERE trading_date = %s",
+                (trading_date,),
+            )
+            return {
+                (r["side"], r["index_name"], r["expiry"]):
+                    (r["wall_strike"], r["broken_level"])
+                for r in cur.fetchall()
+            }
+        except psycopg.errors.UndefinedColumn:
+            logger.warning("monitored_strikes.broken_level missing — apply "
+                           "db/migrations/v4_wall_dynamics.sql; BROKEN badge dormant")
+            cur.execute(
+                "SELECT side, index_name, expiry, wall_strike "
+                "FROM monitored_strikes WHERE trading_date = %s",
+                (trading_date,),
+            )
+            return {
+                (r["side"], r["index_name"], r["expiry"]): (r["wall_strike"], None)
+                for r in cur.fetchall()
+            }
 
 
 _UPSERT_WALL = """

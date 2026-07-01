@@ -127,6 +127,11 @@ class IndexMetrics(ApiModel):
 
     index_name: IndexName
     expiry: date
+    # Tick fetch time (when this index's data was actually pulled). Not written by
+    # index_metrics_from_chain — the tick passes the shared fetched_at to insert;
+    # only read_latest_metrics populates it (from the stored row) so /state can
+    # report a real "last updated" instead of the request clock.
+    ts: Optional[datetime] = None
     spot: Optional[float] = None
     atm: Optional[int] = None
     max_pain: Optional[int] = None  # argmin writer payout over the full chain
@@ -164,3 +169,4 @@ class MonitoredStrike(ApiModel):
     wall_strike: int
     monitored: List[int]            # [wall-interval, wall, wall+interval]
     wall_oi_at_lock: Optional[int] = None
+    broken_level: Optional[int] = None   # v4: former wall spot cleared (sticky badge)

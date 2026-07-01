@@ -23,7 +23,7 @@ def read_monitored_strikes(trading_date: date) -> List[MonitoredStrike]:
         cur.execute(
             """
             SELECT trading_date, side, index_name, option_type, expiry,
-                   wall_strike, monitored, wall_oi_at_lock
+                   wall_strike, monitored, wall_oi_at_lock, broken_level
             FROM monitored_strikes
             WHERE trading_date = %s
             ORDER BY side, index_name
