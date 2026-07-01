@@ -1,16 +1,17 @@
-"""v3 — strike selection over the spot-anchored ladder (§3). PURE, no DB.
+"""v4 — strike selection via wide-scan over the full chain (§4). PURE, no DB.
 
-There are no typed zones anymore. Each index anchors a ladder on its OWN live
-spot (compute.metrics.build_ladder); on that ladder we pick two walls per index,
-re-centered + re-picked EACH TICK (v3 item 3):
+There are no typed zones anymore. Each index picks two walls per index,
+re-picked EACH TICK (v4 wide scan):
 
-  CAP   = highest CE OI at/above spot   (the resistance the trader fades)
-  FLOOR = highest PE OI at/below spot   (the support the trader fades)
+  CAP   = highest CE OI in [spot, spot+scan_reach]   (the resistance the trader fades)
+  FLOOR = highest PE OI in [spot-scan_reach, spot]   (the support the trader fades)
 
-Re-picked from current OI every tick, but with hysteresis (`sticky_margin`): the
-incumbent wall is held unless a challenger's OI beats it by the margin, so it doesn't
-flip on tiny ties. `check_migration` still flags when a bigger neighbor exists
-despite the sticky hold.
+Detection scans the FULL chain within the spot window — the ladder is display-only
+and does NOT limit wall candidates. Re-picked from current OI every tick, but with
+hysteresis (`sticky_margin`): the incumbent wall is held unless a challenger's OI
+beats it by the margin, so it doesn't flip on tiny ties. `check_migration` still
+flags when a bigger neighbor exists despite the sticky hold. Ties break toward spot
+(nearest actionable wall).
 """
 from __future__ import annotations
 
@@ -20,52 +21,44 @@ from compute.metrics import build_ladder, compute_atm
 from schemas.market import ChainSnapshot, Instrument, Ladder, Side, StrikeOI
 from schemas.strikes import MigrationFlag, WallSelection
 
-# CAP fades CALL OI, FLOOR fades PUT OI (v3 §3).
+# CAP fades CALL OI, FLOOR fades PUT OI (v4 §4).
 SIDE_OPTION: Dict[Side, str] = {"CAP": "CE", "FLOOR": "PE"}
 
 
 def select_wall(
     strikes: Sequence[StrikeOI],
     side: Side,
-    ladder_strikes: Sequence[int],
     index_name: str,
     expiry,
     interval: int,
     spot: float,
+    scan_reach: float,
     incumbent: Optional[int] = None,
     sticky_margin: float = 0.0,
 ) -> Optional[WallSelection]:
-    """Highest-OI ladder strike of the side's type, on the correct side of spot.
+    """Highest-OI strike of the side's type within a spot window (v4 wide scan).
 
-    CAP fades CALL OI at/above spot (resistance); FLOOR fades PUT OI at/below spot
-    (support). Re-picked each tick but STICKY: the incumbent wall is held unless a
-    challenger's OI beats it by `sticky_margin` (hysteresis vs tiny ties). A forced
-    re-pick happens when the incumbent is no longer eligible — off the re-centered
-    ladder, or now on the wrong side of spot. Returns None if no strike of that type
-    sits on the ladder at/above (CAP) / at/below (FLOOR) spot.
+    Candidates are FULL-CHAIN strikes (never limited to the displayed ladder):
+    CAP scans CE OI in [spot, spot+scan_reach]; FLOOR scans PE OI in
+    [spot-scan_reach, spot]. Re-picked each tick but STICKY: the incumbent is held
+    unless a challenger's OI beats it by `sticky_margin`. Spot crossing the wall
+    drops the incumbent out of the window → forced re-pick. Ties break toward spot
+    (nearest actionable wall). None if no strike of that type sits in the window.
     """
     option_type = SIDE_OPTION[side]
-    cands = set(ladder_strikes)
-
-    def _eligible(strike: int) -> bool:
-        if strike not in cands:
-            return False
-        return strike >= spot if side == "CAP" else strike <= spot
+    lo, hi = (spot, spot + scan_reach) if side == "CAP" else (spot - scan_reach, spot)
 
     oi_by_strike: Dict[int, int] = {
         s.strike: s.oi
         for s in strikes
-        if s.option_type == option_type and _eligible(s.strike)
+        if s.option_type == option_type and lo <= s.strike < hi
     }
     if not oi_by_strike:
         return None
 
-    # Challenger = highest OI; ties break toward the ladder centre (≈ ATM).
-    centre = (min(ladder_strikes) + max(ladder_strikes)) / 2
-    challenger = max(oi_by_strike, key=lambda k: (oi_by_strike[k], -abs(k - centre)))
+    # Challenger = highest OI; ties break toward spot (nearest actionable wall).
+    challenger = max(oi_by_strike, key=lambda k: (oi_by_strike[k], -abs(k - spot)))
 
-    # Stickiness: hold the still-eligible incumbent unless the challenger's OI beats
-    # it by the margin — so the wall doesn't flip on tiny ties / noise.
     wall = challenger
     if (
         incumbent is not None
@@ -89,24 +82,25 @@ def select_wall(
 
 def select_index_walls(
     chain: ChainSnapshot,
-    ladder: Ladder,
+    interval: int,
+    scan_reach: float,
     incumbents: Optional[Dict[Side, int]] = None,
     sticky_margin: float = 0.0,
 ) -> Dict[Side, WallSelection]:
-    """Both walls (CAP via CE at/above spot, FLOOR via PE at/below spot), sticky.
-
-    `incumbents` maps side → last tick's wall strike, for the hysteresis. Empty on
-    the first tick / after an expiry roll → fresh picks.
-    """
+    """Both walls (CAP via CE above spot, FLOOR via PE below spot) over the scan
+    window, sticky. `interval` is the index's strike step (for `monitored`);
+    `scan_reach` is this index's own-points reach; `incumbents` maps side → last
+    tick's wall strike for the hysteresis. `ChainSnapshot` carries no interval, so
+    `lock_walls` passes the instrument's `strike_interval`."""
     out: Dict[Side, WallSelection] = {}
     if chain.spot is None:
         return out
     incumbents = incumbents or {}
     for side in ("CAP", "FLOOR"):
         sel = select_wall(
-            chain.strikes, side, ladder.strikes,
-            chain.index_name, chain.expiry, ladder.interval,
-            spot=chain.spot, incumbent=incumbents.get(side), sticky_margin=sticky_margin,
+            chain.strikes, side, chain.index_name, chain.expiry, interval,
+            spot=chain.spot, scan_reach=scan_reach,
+            incumbent=incumbents.get(side), sticky_margin=sticky_margin,
         )
         if sel is not None:
             out[side] = sel

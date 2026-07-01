@@ -1,8 +1,11 @@
-"""v3 — ladder planning (pure): spot-anchored ladders per index, re-centered each tick."""
+"""v3/v4 — ladder planning (pure): spot-anchored ladders per index, re-centered each tick."""
 from datetime import date, datetime, timezone
 
 from compute.strikes import plan_ladders, select_index_walls
 from schemas.market import ChainSnapshot, Instrument, StrikeOI
+
+REACH_N = 400
+REACH_S = 1280   # 400 × ~3.20
 
 TS = datetime(2026, 6, 18, tzinfo=timezone.utc)
 NIFTY_EXP = date(2026, 6, 23)
@@ -49,18 +52,12 @@ def test_plan_ladders_skips_index_without_spot():
 
 
 def test_select_index_walls_picks_spot_side_walls():
-    # CAP = max CE OI at/above spot (24350), FLOOR = max PE OI at/below spot (24200).
-    chains = {"NIFTY": _nifty(), "SENSEX": _sensex()}
-    ladders = plan_ladders(chains, INSTR)
-    n = select_index_walls(_nifty(), ladders["NIFTY"])
-    s = select_index_walls(_sensex(), ladders["SENSEX"])
+    n = select_index_walls(_nifty(), 50, REACH_N)
+    s = select_index_walls(_sensex(), 100, REACH_S)
     assert n["CAP"].wall_strike == 24350 and n["FLOOR"].wall_strike == 24200
     assert s["CAP"].wall_strike == 77600 and s["FLOOR"].wall_strike == 77200
 
 
 def test_select_index_walls_holds_incumbent_within_margin():
-    # incumbent CAP 24400 (300) vs challenger 24350 (900): 900 ≥ 300×1.15 → moves.
-    # incumbent CAP 24350 (900) vs same chain: it IS the challenger → stays.
-    ladders = plan_ladders({"NIFTY": _nifty()}, INSTR)
-    held = select_index_walls(_nifty(), ladders["NIFTY"], {"CAP": 24350}, sticky_margin=0.15)
+    held = select_index_walls(_nifty(), 50, REACH_N, {"CAP": 24350}, sticky_margin=0.05)
     assert held["CAP"].wall_strike == 24350
