@@ -349,6 +349,32 @@ def test_build_state_attaches_strength_and_action(monkeypatch):
                                                     24350, 24300, 24250, 24200]
 
 
+def test_build_state_flags_off_ladder_wall_and_callout(monkeypatch):
+    from schemas.market import IndexMetrics, Ladder
+    td = date(2026, 6, 19)
+    nexp, sexp = date(2026, 6, 23), date(2026, 6, 25)
+    nifty_ladder = Ladder(index_name="NIFTY", expiry=nexp, spot_at_lock=24300.0, atm=24300,
+                          interval=50, strikes=[24450, 24400, 24350, 24300, 24250, 24200, 24150, 24100])
+    sensex_ladder = Ladder(index_name="SENSEX", expiry=sexp, spot_at_lock=78000.0, atm=78000,
+                           interval=100, strikes=[78300, 78200, 78100, 78000, 77900, 77800, 77700, 77600])
+    monitored = [
+        _ms("CAP", "NIFTY", "CE", 24700, 50, nexp),      # OFF the ladder (top rung 24450)
+        _ms("CAP", "SENSEX", "CE", 78500, 100, sexp),    # OFF the ladder (top rung 78300)
+    ]
+    monkeypatch.setattr(engine, "read_monitored_strikes", lambda d: monitored)
+    monkeypatch.setattr(engine, "read_oi_series", lambda i, o, s, e, since: _building_series(1000 + s))
+    monkeypatch.setattr(engine, "read_latest_metrics", lambda d: {
+        "NIFTY": IndexMetrics(index_name="NIFTY", expiry=nexp, spot=24300.0),
+        "SENSEX": IndexMetrics(index_name="SENSEX", expiry=sexp, spot=78000.0)})
+    monkeypatch.setattr(engine, "get_ladders", lambda d: {"NIFTY": nifty_ladder, "SENSEX": sensex_ladder})
+    state = engine.build_state(trading_date=td, now=NOW, window_minutes=15)
+    cap = state.sides[0]
+    assert cap.nifty.wall_off_ladder is True
+    assert cap.nifty.strength is not None            # off-ladder wall STILL gets a strength (dominance fix)
+    assert cap.wall_callout is not None
+    assert cap.wall_callout.nifty.strike == 24700
+
+
 def test_build_state_pairs_ladders_by_level(monkeypatch):
     from schemas.market import IndexMetrics, Ladder
     td = date(2026, 6, 19)

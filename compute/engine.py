@@ -20,7 +20,7 @@ from typing import Dict, Optional
 
 from compute.expiry import assess_from_dates
 from compute.metrics import dominance_strength, ladder_broken
-from compute.pairing import pair_ladders_by_level
+from compute.pairing import build_wall_callout, pair_ladders_by_level
 from compute.series import read_monitored_strikes, read_oi_series
 from compute.verdict import build_wall_signal, side_verdict, strike_signal
 from config.thresholds import (
@@ -58,18 +58,19 @@ def _index_wall(ms: MonitoredStrike, now: datetime, window: int, ladder=None) ->
         for strike in to_score
     }
     ws = build_wall_signal(ms, signals)
-
-    # Full scored ladder (descending by strike) + wall STRENGTH (dominance over the
-    # ladder), both from the OI we just scored — no extra query.
+    ws.broken_level = ms.broken_level
     if ladder is not None and ladder.strikes:
+        ladder_set = set(ladder.strikes)
+        ws.wall_off_ladder = ms.wall_strike not in ladder_set
         ws.ladder = [signals[s] for s in sorted(ladder.strikes, reverse=True)]
-        oi_by_strike = {
-            s: signals[s].oi_latest for s in ladder.strikes
-            if signals[s].oi_latest is not None
-        }
-        wall_oi = oi_by_strike.get(ms.wall_strike)
-        others = [oi for s, oi in oi_by_strike.items() if s != ms.wall_strike]
+        # Strength: size the wall against the 8 VISIBLE rungs. Take wall OI from the
+        # scored wall signal so an OFF-LADDER wall still gets a strength.
+        wall_oi = ws.wall.oi_latest
+        others = [signals[s].oi_latest for s in ladder.strikes
+                  if s != ms.wall_strike and signals[s].oi_latest is not None]
         ws.dominance, ws.strength = dominance_strength(wall_oi, others)
+    else:
+        ws.wall_off_ladder = False
     return ws
 
 
@@ -109,6 +110,12 @@ def build_state(
 
     # v3 §6/§3 context: latest max-pain/PCR per index + RANGE-BROKEN (spot left ladder).
     metrics_by_index = read_latest_metrics(trading_date)
+    # "Last updated" = the freshest tick that actually stored data (real data time),
+    # not `now`. Derived from the metrics we just read — no extra query.
+    data_ts = max(
+        (m.ts for m in metrics_by_index.values() if m.ts is not None),
+        default=None,
+    )
     ladders = get_ladders(trading_date)
     range_broken = [
         name for name, lad in ladders.items()
@@ -149,10 +156,11 @@ def build_state(
             sensex_wall.ladder if sensex_wall else [],
             live_ratio,
         )
+        sv.wall_callout = build_wall_callout(nifty_wall, sensex_wall, live_ratio)
         sides.append(sv)
 
     return VerdictState(
-        **base, live_ratio=live_ratio, expiry=assessment,
+        **base, data_ts=data_ts, live_ratio=live_ratio, expiry=assessment,
         metrics=list(metrics_by_index.values()),
         range_broken=range_broken, sides=sides,
     )

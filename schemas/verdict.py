@@ -69,6 +69,11 @@ class WallSignal(ApiModel):
     # (descending by strike, wall flagged). Backs the level-paired table (v3 item 1);
     # `wall` + `neighbors` remain the subset the verdict math reads.
     ladder: List[StrikeSignal] = []
+    # v4: the detected wall sits outside the visible 8-rung ladder → render it as a
+    # highlighted callout row (verdict still computes on it).
+    wall_off_ladder: bool = False
+    # v4: former wall level spot cleared, held until spot pulls back (sticky BROKEN).
+    broken_level: Optional[int] = None
 
 
 class PairedRung(ApiModel):
@@ -114,12 +119,19 @@ class SideVerdict(ApiModel):
     # Level-paired ladder rows for this side (Nifty rung ↔ closest Sensex rung by
     # level), built from the two `WallSignal.ladder`s. Display only (v3 item 1).
     paired: List[PairedRung] = []
+    # v4: single paired callout row for an off-ladder wall (Aligned/Divergent). None
+    # when both indices' walls are on their visible ladders.
+    wall_callout: Optional[PairedRung] = None
 
 
 class VerdictState(ApiModel):
     """The whole dashboard state for one instant — the `/state` payload."""
 
-    ts: datetime
+    ts: datetime                             # when this response was built (server clock)
+    # When the underlying market data was last fetched — the latest index_metrics.ts
+    # (a real tick), NOT the request clock. This is what the dashboard shows as
+    # "last updated"; None until a tick has stored metrics for the day.
+    data_ts: Optional[datetime] = None
     trading_date: date
     weekday: str                             # 'Mon'..'Fri' (DTE bucketing, v3 §4)
     window_minutes: int

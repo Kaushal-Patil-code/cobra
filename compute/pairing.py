@@ -27,6 +27,24 @@ def _agree(nifty: Optional[StrikeSignal], sensex: Optional[StrikeSignal]) -> Opt
     return "ALIGNED" if nd == sd else "DIVERGENT"
 
 
+def build_wall_callout(nifty_ws, sensex_ws, ratio):
+    """A single paired callout row for a wall that sits off its 8-rung ladder (v4).
+
+    A leg is filled only when THAT index's wall is off-ladder (else it's already in
+    the visible table). None when both walls are on-ladder."""
+    n_off = bool(nifty_ws and nifty_ws.wall_off_ladder)
+    s_off = bool(sensex_ws and sensex_ws.wall_off_ladder)
+    if not n_off and not s_off:
+        return None
+    n_leg = nifty_ws.wall if n_off else None
+    s_leg = sensex_ws.wall if s_off else None
+    gap = None
+    if ratio and n_leg is not None and s_leg is not None:
+        gap = round(abs(s_leg.strike - n_leg.strike * ratio))
+    return PairedRung(nifty=n_leg, sensex=s_leg, agree=_agree(n_leg, s_leg),
+                      is_wall=True, level_gap=gap)
+
+
 def pair_ladders_by_level(
     nifty_rungs: Sequence[StrikeSignal],
     sensex_rungs: Sequence[StrikeSignal],

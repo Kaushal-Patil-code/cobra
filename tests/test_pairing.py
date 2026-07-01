@@ -6,8 +6,8 @@ Sensex leg is None only when the ratio / Sensex data is missing. Pure, no DB.
 """
 from datetime import date
 
-from compute.pairing import pair_ladders_by_level
-from schemas.verdict import StrikeSignal
+from compute.pairing import build_wall_callout, pair_ladders_by_level
+from schemas.verdict import StrikeSignal, WallSignal
 
 EXP = date(2026, 6, 24)
 
@@ -91,3 +91,33 @@ def test_equidistant_tie_breaks_to_lower_sensex_strike():
         sensex = [_sig(s, idx="SENSEX") for s in order]
         rows = pair_ladders_by_level(nifty, sensex, 5.0)
         assert rows[0].sensex.strike == 700 and rows[0].level_gap == 50
+
+
+# --- build_wall_callout (v4 off-ladder callout row) --------------------------
+
+def _ws(index, strike, direction, off_ladder):
+    sig = StrikeSignal(index_name=index, option_type="CE", strike=strike,
+                       expiry=EXP, is_wall=True, direction=direction, oi_latest=1000)
+    return WallSignal(index_name=index, state="building", wall=sig,
+                      wall_off_ladder=off_ladder)
+
+
+def test_callout_none_when_both_on_ladder():
+    n = _ws("NIFTY", 24300, "up", False)
+    s = _ws("SENSEX", 77800, "up", False)
+    assert build_wall_callout(n, s, 3.2) is None
+
+
+def test_callout_pairs_off_ladder_walls_with_agree():
+    n = _ws("NIFTY", 24550, "up", True)
+    s = _ws("SENSEX", 78560, "up", True)      # 24550×3.2 = 78560
+    row = build_wall_callout(n, s, 3.2)
+    assert row.nifty.strike == 24550 and row.sensex.strike == 78560
+    assert row.agree == "ALIGNED" and row.is_wall and row.level_gap == 0
+
+
+def test_callout_one_leg_when_only_nifty_off_ladder():
+    n = _ws("NIFTY", 24550, "up", True)
+    s = _ws("SENSEX", 77800, "down", False)
+    row = build_wall_callout(n, s, 3.2)
+    assert row.nifty.strike == 24550 and row.sensex is None and row.agree is None
