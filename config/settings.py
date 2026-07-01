@@ -96,7 +96,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     scheduler_enabled: bool = True
     tick_interval_minutes: int = Field(default=3, ge=1)
-    tick_strikecount: int = Field(default=10, ge=1)
+    tick_strikecount: int = Field(default=15, ge=1)
     tick_window_minutes: int = 15
     # Pre-warm the Fyers token a couple minutes before the open (09:13 IST) so the
     # first capture at 09:15 already has a valid token.

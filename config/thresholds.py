@@ -31,13 +31,17 @@ TREND_STREAK = 3
 # move is UNCONFIRMED.
 MIN_CONFIRM_STREAK = 2
 
-# --- v3 item 3: dynamic, spot-anchored wall selection (re-picked each tick) -
-# The ladder re-centers on live spot every tick and the CAP/FLOOR walls are
-# re-picked from current OI (cap = max CE OI at/above spot, floor = max PE OI
-# at/below spot). To avoid flip-flopping on tiny ties, the incumbent wall is held
-# unless a challenger strike's OI beats it by this margin (hysteresis). Ratio-based
-# so it self-adjusts to OI size; tune on logged data (like the strength cutoffs).
-WALL_STICKY_MARGIN = 0.15
+# --- v3 item 3 / v4: dynamic wall detection (wide-scan + hysteresis) --------
+# Detection scans the FULL chain, not just the 8 displayed rungs: CAP = max CE OI
+# in [spot, spot+reach], FLOOR = max PE OI in [spot-reach, spot]. `reach` is in the
+# index's own points, scaled by the live Sensex/Nifty ratio so both indices reach
+# the same relative level (NIFTY 400 ≈ SENSEX 1280). Tune on logged data.
+WALL_SCAN_REACH_POINTS = 400
+
+# Hysteresis (hold-unless-beaten): keep the incumbent wall; switch only if a
+# challenger's OI beats it by this margin, OR spot crosses the wall (→ re-pick).
+# 5% kills flicker without lagging a real migration.
+WALL_STICKY_MARGIN = 0.05
 
 # --- Magnitude buckets on |Δ% over window| (spec §5.1) ---------------------
 #   <5%  noise · 5–10% mild · ≥10% signal · ≥20% strong
