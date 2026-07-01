@@ -34,8 +34,8 @@ def read_incumbent_walls(
     """{(side, index_name, expiry): (wall_strike, broken_level)} — last tick's walls
     (for stickiness + the sticky BROKEN badge). Degrades to (wall, None) if the
     broken_level column isn't migrated yet."""
-    with get_conn() as conn, conn.cursor() as cur:
-        try:
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT side, index_name, expiry, wall_strike, broken_level "
                 "FROM monitored_strikes WHERE trading_date = %s",
@@ -46,18 +46,19 @@ def read_incumbent_walls(
                     (r["wall_strike"], r["broken_level"])
                 for r in cur.fetchall()
             }
-        except psycopg.errors.UndefinedColumn:
-            logger.warning("monitored_strikes.broken_level missing — apply "
-                           "db/migrations/v4_wall_dynamics.sql; BROKEN badge dormant")
-            cur.execute(
-                "SELECT side, index_name, expiry, wall_strike "
-                "FROM monitored_strikes WHERE trading_date = %s",
-                (trading_date,),
-            )
-            return {
-                (r["side"], r["index_name"], r["expiry"]): (r["wall_strike"], None)
-                for r in cur.fetchall()
-            }
+    except psycopg.errors.UndefinedColumn:
+        logger.warning("monitored_strikes.broken_level missing — apply "
+                       "db/migrations/v4_wall_dynamics.sql; BROKEN badge dormant")
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT side, index_name, expiry, wall_strike "
+            "FROM monitored_strikes WHERE trading_date = %s",
+            (trading_date,),
+        )
+        return {
+            (r["side"], r["index_name"], r["expiry"]): (r["wall_strike"], None)
+            for r in cur.fetchall()
+        }
 
 
 _UPSERT_WALL = """

@@ -73,15 +73,26 @@ def test_read_incumbent_walls_keys_and_broken(monkeypatch):
 
 
 def test_read_incumbent_walls_degrades_without_broken_column(monkeypatch):
-    class DegradingCursor(FakeCursor):
+    class AbortingCursor(FakeCursor):
+        def __init__(self, fetch=None):
+            super().__init__(fetch=fetch)
+            self._aborted = False
+
         def execute(self, sql, params=None):
-            if "broken_level" in sql:
+            if self._aborted:                                    # reused after abort
+                raise psycopg.errors.InFailedSqlTransaction("aborted")
+            if "broken_level" in sql:                            # pre-migration
+                self._aborted = True
                 raise psycopg.errors.UndefinedColumn("no column")
             super().execute(sql, params)
-    cur = DegradingCursor(fetch=[
-        {"side": "CAP", "index_name": "NIFTY", "expiry": EXP, "wall_strike": 24400},
-    ])
-    _patch(monkeypatch, sel, cur)
+
+    def fresh_conn():                                            # a new conn+cursor each call
+        cur = AbortingCursor(fetch=[
+            {"side": "CAP", "index_name": "NIFTY", "expiry": EXP, "wall_strike": 24400},
+        ])
+        return FakeConn(cur)
+
+    monkeypatch.setattr(sel, "get_conn", fresh_conn)
     got = sel.read_incumbent_walls(TD)
     assert got == {("CAP", "NIFTY", EXP): (24400, None)}
 
