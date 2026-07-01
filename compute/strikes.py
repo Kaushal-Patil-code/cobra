@@ -151,3 +151,22 @@ def check_migration(sel: WallSelection, current_oi: Dict[int, int]) -> Migration
             detail=f"{sel.side} shifting {direction}: {sel.wall_strike} → {nb_strike}",
         )
     return MigrationFlag(shifting=False, from_strike=sel.wall_strike, detail="wall holding")
+
+
+def compute_broken_level(
+    side: Side, prev_wall: Optional[int], prev_broken: Optional[int], spot: float
+) -> Optional[int]:
+    """The former wall level spot has cleared and not yet pulled back from (v4).
+
+    CAP breaks when spot rises ABOVE the wall; FLOOR when spot falls BELOW it. Keeps
+    the FIRST level that broke (no flicker on a multi-strike run) until spot returns
+    past it. Returns None while the wall is intact / after a pull-back.
+    """
+    above = side == "CAP"
+    if prev_broken is None:
+        if prev_wall is not None and ((spot > prev_wall) if above else (spot < prev_wall)):
+            return prev_wall
+        return None
+    # active break — clear only once spot pulls back to/through the broken level.
+    cleared = spot <= prev_broken if above else spot >= prev_broken
+    return None if cleared else prev_broken

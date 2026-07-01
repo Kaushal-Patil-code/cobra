@@ -128,3 +128,38 @@ def test_check_migration():
     assert not check_migration(sel, {24300: 100, 24350: 900, 24400: 300}).shifting
     up = check_migration(sel, {24300: 100, 24350: 900, 24400: 1200})
     assert up.shifting and up.direction == "up" and up.to_strike == 24400
+
+
+# --- v4: sticky BROKEN level -----------------------------------------------
+from compute.strikes import compute_broken_level
+
+
+def test_broken_cap_sets_level_when_spot_clears_wall():
+    # spot 24260 above the incumbent CAP 24200 → 24200 broke.
+    assert compute_broken_level("CAP", 24200, None, 24260) == 24200
+
+
+def test_broken_cap_none_when_spot_below_wall():
+    assert compute_broken_level("CAP", 24200, None, 24180) is None
+
+
+def test_broken_cap_sticky_keeps_first_level_through_further_run():
+    # already broken at 24200; spot keeps running to 24360 → still 24200 (not overwritten).
+    assert compute_broken_level("CAP", 24300, 24200, 24360) == 24200
+
+
+def test_broken_cap_clears_on_pullback():
+    # spot pulled back to/below the broken level → badge clears.
+    assert compute_broken_level("CAP", 24300, 24200, 24200) is None
+    assert compute_broken_level("CAP", 24300, 24200, 24150) is None
+
+
+def test_broken_floor_mirror():
+    assert compute_broken_level("FLOOR", 24000, None, 23950) == 24000   # spot below floor → broke
+    assert compute_broken_level("FLOOR", 24000, None, 24050) is None
+    assert compute_broken_level("FLOOR", 23900, 24000, 23850) == 24000  # sticky
+    assert compute_broken_level("FLOOR", 23900, 24000, 24000) is None   # pull back → clear
+
+
+def test_broken_no_incumbent_is_none():
+    assert compute_broken_level("CAP", None, None, 24300) is None
