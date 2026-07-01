@@ -28,7 +28,7 @@ def _mk(strike, ot, oi, idx="NIFTY"):
 
 def test_select_wall_cap_picks_max_ce_oi_in_window():
     strikes = [
-        _mk(24350, "CE", 900), _mk(24400, "CE", 300), _mk(24700, "CE", 5000),  # 24700 > spot+400 → excluded
+        _mk(24350, "CE", 900), _mk(24400, "CE", 300), _mk(24750, "CE", 5000),  # 24750 > spot+400 → excluded
         _mk(24350, "PE", 99999),                                               # PE ignored for CAP
     ]
     sel = select_wall(strikes, "CAP", "NIFTY", EXP, 50, 24300, REACH)
@@ -92,6 +92,20 @@ def test_select_wall_forced_repick_when_spot_crossed_incumbent():
     sel = select_wall(strikes, "CAP", "NIFTY", EXP, 50, 24380, REACH,
                       incumbent=24350, sticky_margin=0.05)
     assert sel.wall_strike == 24450
+
+
+def test_select_wall_cap_includes_far_edge():
+    # spot+reach (24700) is inside the CLOSED window → dominant edge strike wins.
+    strikes = [_mk(24350, "CE", 900), _mk(24700, "CE", 5000)]
+    sel = select_wall(strikes, "CAP", "NIFTY", EXP, 50, 24300, REACH)
+    assert sel.wall_strike == 24700
+
+
+def test_select_wall_floor_includes_strike_at_spot():
+    # spot itself is in the FLOOR window [spot-reach, spot] (closed).
+    strikes = [_mk(24300, "PE", 5000), _mk(24200, "PE", 1000)]
+    sel = select_wall(strikes, "FLOOR", "NIFTY", EXP, 50, 24300, REACH)
+    assert sel.wall_strike == 24300
 
 
 def test_fixture_smoke_nifty_cap():

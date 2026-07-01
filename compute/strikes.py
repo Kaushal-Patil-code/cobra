@@ -51,7 +51,7 @@ def select_wall(
     oi_by_strike: Dict[int, int] = {
         s.strike: s.oi
         for s in strikes
-        if s.option_type == option_type and lo <= s.strike < hi
+        if s.option_type == option_type and lo <= s.strike <= hi
     }
     if not oi_by_strike:
         return None
