@@ -4,6 +4,17 @@ from datetime import date, datetime, timezone
 from compute.strikes import plan_ladders, select_index_walls
 from schemas.market import ChainSnapshot, Instrument, StrikeOI
 
+
+class _NullCur:
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def execute(self, *a, **k): pass
+    rowcount = 0
+class _NullConn:
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def cursor(self): return _NullCur()
+
 REACH_N = 400
 REACH_S = 1280   # 400 × ~3.20
 
@@ -61,3 +72,24 @@ def test_select_index_walls_picks_spot_side_walls():
 def test_select_index_walls_holds_incumbent_within_margin():
     held = select_index_walls(_nifty(), 50, REACH_N, {"CAP": 24350}, sticky_margin=0.05)
     assert held["CAP"].wall_strike == 24350
+
+
+def test_lock_walls_scales_sensex_reach_by_live_ratio(monkeypatch):
+    import market.selection as selmod
+    captured = []
+
+    def fake_select(chain, interval, scan_reach, incumbents=None, sticky_margin=0.0):
+        captured.append((chain.index_name, round(scan_reach)))
+        return {}
+
+    monkeypatch.setattr(selmod, "select_index_walls", fake_select)
+    monkeypatch.setattr(selmod, "upsert_ladders", lambda td, lads: 0)
+    monkeypatch.setattr(selmod, "read_incumbent_walls", lambda td: {})
+    monkeypatch.setattr(selmod, "all_instruments", lambda: INSTR)
+    # no DB writes happen (select returns {}), so get_conn is only opened for the loop.
+    monkeypatch.setattr(selmod, "get_conn", lambda: _NullConn())
+    selmod.lock_walls(NIFTY_EXP, {"NIFTY": _nifty(), "SENSEX": _sensex()})
+    reach = dict(captured)
+    assert reach["NIFTY"] == 400
+    # 400 × (77400 / 24300) ≈ 1274
+    assert 1260 <= reach["SENSEX"] <= 1290

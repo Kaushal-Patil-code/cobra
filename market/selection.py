@@ -15,8 +15,8 @@ from typing import Dict, List, Optional, Tuple
 
 import psycopg
 
-from compute.strikes import plan_ladders, select_index_walls
-from config.thresholds import WALL_STICKY_MARGIN
+from compute.strikes import compute_broken_level, plan_ladders, select_index_walls
+from config.thresholds import WALL_SCAN_REACH_POINTS, WALL_STICKY_MARGIN
 from db.db import get_conn
 from market.fetch import fetch_chains
 from market.instruments import all_instruments
@@ -64,6 +64,22 @@ def read_incumbent_walls(
 _UPSERT_WALL = """
 INSERT INTO monitored_strikes
     (trading_date, side, index_name, option_type, expiry,
+     wall_strike, monitored, wall_oi_at_lock, broken_level)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+ON CONFLICT (trading_date, side, index_name, expiry) DO UPDATE
+    SET option_type     = EXCLUDED.option_type,
+        wall_strike     = EXCLUDED.wall_strike,
+        monitored       = EXCLUDED.monitored,
+        wall_oi_at_lock = EXCLUDED.wall_oi_at_lock,
+        broken_level    = EXCLUDED.broken_level,
+        locked_at       = now()
+    WHERE monitored_strikes.wall_strike IS DISTINCT FROM EXCLUDED.wall_strike
+       OR monitored_strikes.broken_level IS DISTINCT FROM EXCLUDED.broken_level
+"""
+
+_UPSERT_WALL_BASE = """
+INSERT INTO monitored_strikes
+    (trading_date, side, index_name, option_type, expiry,
      wall_strike, monitored, wall_oi_at_lock)
 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
 ON CONFLICT (trading_date, side, index_name, expiry) DO UPDATE
@@ -76,63 +92,82 @@ ON CONFLICT (trading_date, side, index_name, expiry) DO UPDATE
 """
 
 
-def _upsert_wall(cur, trading_date: date, side: str, sel) -> int:
-    cur.execute(
-        _UPSERT_WALL,
-        (trading_date, side, sel.index_name, sel.option_type, sel.expiry,
-         sel.wall_strike, sel.monitored, sel.wall_oi),
-    )
-    return cur.rowcount  # 1 = newly created or moved, 0 = sticky hold (unchanged)
+def _upsert_wall(cur, trading_date: date, side: str, sel, broken_level, with_broken=True) -> int:
+    if with_broken:
+        cur.execute(_UPSERT_WALL, (
+            trading_date, side, sel.index_name, sel.option_type, sel.expiry,
+            sel.wall_strike, sel.monitored, sel.wall_oi, broken_level))
+    else:
+        cur.execute(_UPSERT_WALL_BASE, (
+            trading_date, side, sel.index_name, sel.option_type, sel.expiry,
+            sel.wall_strike, sel.monitored, sel.wall_oi))
+    return cur.rowcount
 
 
 def lock_walls(trading_date: date, chains: Dict[str, ChainSnapshot]) -> List[dict]:
-    """Re-center ladders + re-pick CAP/FLOOR walls (sticky) for each index, this tick.
-
-    Returns only the walls that CHANGED this tick (a new pick or a move); a sticky
-    hold is a no-op and is not returned. `build_state` reads the freshly-UPSERTed
-    rows regardless, so an empty return just means nothing moved.
-    """
+    """Re-center display ladders + wide-scan re-pick CAP/FLOOR walls (sticky), this
+    tick. Detection scans the full chain in a per-index spot window; the ladder is
+    display-only. Returns the walls that CHANGED (new pick, move, or badge change)."""
     instruments = all_instruments()
-    ladders = plan_ladders(chains, instruments)   # re-centered on current spot
+    ladders = plan_ladders(chains, instruments)   # display only
     if not ladders:
         logger.warning("no ladders to refresh for %s (no live spot?)", trading_date)
         return []
-
     upsert_ladders(trading_date, list(ladders.values()))
-    incumbents = read_incumbent_walls(trading_date)
 
-    changed: List[dict] = []
-    with get_conn() as conn, conn.cursor() as cur:
-        for name, chain in chains.items():
-            ladder = ladders.get(name)
-            if ladder is None:
-                logger.warning("no ladder for %s (no live spot?) — cannot pick walls", name)
+    incumbents = read_incumbent_walls(trading_date)   # {key: (wall, broken)}
+    nspot = chains["NIFTY"].spot if "NIFTY" in chains and chains["NIFTY"].spot else None
+
+    # Build all picks first (pure), then persist (so a missing column degrades cleanly).
+    picks: List[Tuple[str, object, Optional[int]]] = []
+    for name, chain in chains.items():
+        inst = instruments.get(name)
+        if inst is None or chain.spot is None:
+            logger.warning("no instrument/spot for %s — cannot pick walls", name)
+            continue
+        reach = (WALL_SCAN_REACH_POINTS * (chain.spot / nspot) if nspot
+                 else WALL_SCAN_REACH_POINTS * float(inst.price_mult))
+        inc = {s: incumbents.get((s, name, chain.expiry), (None, None)) for s in SIDES}
+        inc_wall = {s: inc[s][0] for s in SIDES}
+        sels = select_index_walls(chain, inst.strike_interval, reach, inc_wall,
+                                  WALL_STICKY_MARGIN)
+        for side in SIDES:
+            selc = sels.get(side)
+            if selc is None:
+                logger.warning(
+                    "could not pick %s %s on expiry %s — no %s OI in the %s-pt window",
+                    name, side, chain.expiry, "CE" if side == "CAP" else "PE", round(reach))
                 continue
-            inc: Dict[str, Optional[int]] = {
-                s: incumbents.get((s, name, chain.expiry)) for s in SIDES
-            }
-            sels = select_index_walls(chain, ladder, inc, WALL_STICKY_MARGIN)
-            for side in SIDES:
-                sel = sels.get(side)
-                if sel is None:
-                    logger.warning(
-                        "could not pick %s %s on expiry %s — no %s OI at/%s spot on the ladder",
-                        name, side, chain.expiry,
-                        "CE" if side == "CAP" else "PE",
-                        "above" if side == "CAP" else "below",
-                    )
-                    continue
-                if _upsert_wall(cur, trading_date, side, sel):
-                    changed.append({
-                        "side": side, "index": sel.index_name,
-                        "option_type": sel.option_type, "wall": sel.wall_strike,
-                        "monitored": sel.monitored, "expiry": str(sel.expiry),
-                    })
-                    logger.info(
-                        "refreshed %s %s wall=%s monitored=%s (expiry %s)",
-                        sel.index_name, side, sel.wall_strike, sel.monitored, sel.expiry,
-                    )
-    return changed
+            broken = compute_broken_level(side, inc_wall[side], inc[side][1], chain.spot)
+            picks.append((side, selc, broken))
+
+    return _persist_picks(trading_date, picks)
+
+
+def _persist_picks(trading_date: date, picks) -> List[dict]:
+    """UPSERT all picks; retry the whole batch without broken_level if the column
+    isn't migrated (never refreeze walls on a missed migration)."""
+    for with_broken in (True, False):
+        changed: List[dict] = []
+        try:
+            with get_conn() as conn, conn.cursor() as cur:
+                for side, selc, broken in picks:
+                    if _upsert_wall(cur, trading_date, side, selc, broken, with_broken):
+                        changed.append({
+                            "side": side, "index": selc.index_name,
+                            "option_type": selc.option_type, "wall": selc.wall_strike,
+                            "monitored": selc.monitored, "expiry": str(selc.expiry),
+                            "broken_level": broken if with_broken else None,
+                        })
+                        logger.info("refreshed %s %s wall=%s broken=%s (expiry %s)",
+                                    selc.index_name, side, selc.wall_strike,
+                                    broken if with_broken else "n/a", selc.expiry)
+            return changed
+        except psycopg.errors.UndefinedColumn:
+            logger.warning("monitored_strikes.broken_level missing — persisting walls "
+                           "without the BROKEN badge; apply db/migrations/v4_wall_dynamics.sql")
+            continue
+    return []
 
 
 def lock_session(trading_date: date, strikecount: int = 10) -> List[dict]:

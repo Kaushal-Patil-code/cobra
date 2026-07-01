@@ -97,24 +97,27 @@ def test_read_incumbent_walls_degrades_without_broken_column(monkeypatch):
     assert got == {("CAP", "NIFTY", EXP): (24400, None)}
 
 
-def test_upsert_wall_passes_columns_in_order_and_returns_rowcount(monkeypatch):
+def test_upsert_wall_passes_columns_in_order_with_broken(monkeypatch):
     cur = FakeCursor(rowcounts=[1])
     wsel = WallSelection(side="CAP", index_name="NIFTY", option_type="CE", expiry=EXP,
                          wall_strike=24400, wall_oi=900,
                          monitored=[24350, 24400, 24450], interval=50)
-    changed = sel._upsert_wall(cur, TD, "CAP", wsel)
-    assert changed == 1                                   # rowcount passed through
+    changed = sel._upsert_wall(cur, TD, "CAP", wsel, 24350)
+    assert changed == 1
     _sql, params = cur.calls[0]
     assert params == (TD, "CAP", "NIFTY", "CE", EXP, 24400,
-                      [24350, 24400, 24450], 900)         # exact INSERT column order
+                      [24350, 24400, 24450], 900, 24350)   # broken_level last
 
 
-def test_upsert_wall_sticky_hold_returns_zero(monkeypatch):
-    cur = FakeCursor(rowcounts=[0])                       # WHERE wall unchanged → no update
+def test_upsert_wall_base_sql_when_column_missing(monkeypatch):
+    cur = FakeCursor(rowcounts=[1])
     wsel = WallSelection(side="CAP", index_name="NIFTY", option_type="CE", expiry=EXP,
                          wall_strike=24400, wall_oi=900,
                          monitored=[24350, 24400, 24450], interval=50)
-    assert sel._upsert_wall(cur, TD, "CAP", wsel) == 0
+    sel._upsert_wall(cur, TD, "CAP", wsel, 24350, with_broken=False)
+    _sql, params = cur.calls[0]
+    assert "broken_level" not in _sql
+    assert params == (TD, "CAP", "NIFTY", "CE", EXP, 24400, [24350, 24400, 24450], 900)
 
 
 def test_upsert_ladders_counts_only_changed_rows(monkeypatch):
