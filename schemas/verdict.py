@@ -128,6 +128,10 @@ class VerdictState(ApiModel):
     """The whole dashboard state for one instant — the `/state` payload."""
 
     ts: datetime                             # when this response was built (server clock)
+    # When the underlying market data was last fetched — the latest index_metrics.ts
+    # (a real tick), NOT the request clock. This is what the dashboard shows as
+    # "last updated"; None until a tick has stored metrics for the day.
+    data_ts: Optional[datetime] = None
     trading_date: date
     weekday: str                             # 'Mon'..'Fri' (DTE bucketing, v3 §4)
     window_minutes: int

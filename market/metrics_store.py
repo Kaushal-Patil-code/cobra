@@ -43,7 +43,7 @@ def read_latest_metrics(trading_date: date) -> Dict[str, IndexMetrics]:
         cur.execute(
             """
             SELECT DISTINCT ON (index_name)
-                   index_name, expiry, spot, atm, max_pain, pcr, call_oi, put_oi
+                   index_name, expiry, ts, spot, atm, max_pain, pcr, call_oi, put_oi
             FROM index_metrics
             WHERE trading_date = %s
             ORDER BY index_name, ts DESC
@@ -53,7 +53,7 @@ def read_latest_metrics(trading_date: date) -> Dict[str, IndexMetrics]:
         rows = cur.fetchall()
     return {
         r["index_name"]: IndexMetrics(
-            index_name=r["index_name"], expiry=r["expiry"],
+            index_name=r["index_name"], expiry=r["expiry"], ts=r["ts"],
             spot=float(r["spot"]) if r["spot"] is not None else None,
             atm=r["atm"], max_pain=r["max_pain"],
             pcr=float(r["pcr"]) if r["pcr"] is not None else None,
