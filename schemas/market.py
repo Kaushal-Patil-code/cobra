@@ -138,6 +138,7 @@ class IndexMetrics(ApiModel):
     pcr: Optional[float] = None     # putOi / callOi (chain totals)
     call_oi: Optional[int] = None
     put_oi: Optional[int] = None
+    vix: Optional[float] = None     # India VIX at this tick (same for both indices, §5.3)
 
 
 # --- Phase 4: read models for the verdict engine ---------------------------

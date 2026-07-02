@@ -9,10 +9,25 @@ read as PIN/HOLD, never a breakout. The only NIFTY-ONLY case left is a Sensex
 
 DTE is **calendar** days from the chain's nearest expiry to "today" (IST date),
 which reproduces the spec's weekday table (e.g. Wed→next-Tue = ~6).
+
+READ-NEAR / TRADE-NEXT (§1, per Hi) — an invariant, do not "optimise" it away:
+  - Walls, max-pain and the OI/verdict are ALWAYS read off the NEAREST expiry chain.
+    That is where the pin and the real OI mass sit, especially on expiry day; the
+    next-week chain's OI is thin and would not show the true wall. NEVER switch
+    wall-reading to next-week.
+  - The trader FADES with the NEXT week's expiry, so 0-DTE theta / IV-crush never
+    applies to what is actually bought. Therefore near/at expiry = a MATURED wall =
+    FULL trust: HIGH is allowed on BOTH 1-DTE and 0-DTE HOLDING — there is NO
+    MODERATE conviction cap (see compute.verdict.side_verdict; the old cap guarded a
+    risk this workflow does not take).
+  - The one guard that STAYS: a 0-DTE OI *unwind* on the nearest chain is settlement,
+    not a breakout (the OI drains as it settles — and it isn't even the chain being
+    traded), so it reads as PIN/HOLD. See compute.verdict._effective_state.
 """
 from __future__ import annotations
 
 from datetime import date
+from typing import Optional
 
 from schemas.market import ExpiryAssessment, IndexExpiry
 
@@ -25,6 +40,17 @@ def pin_label(nifty_pin: bool, sensex_pin: bool) -> str:
     """EXPIRY/PIN banner naming the 0-DTE index/indices (v3 §4)."""
     pinned = [n for n, on in (("Nifty", nifty_pin), ("Sensex", sensex_pin)) if on]
     return f"EXPIRY/PIN — {' & '.join(pinned)} 0-DTE"
+
+
+def expiry_pin_note(max_pain: Optional[int]) -> Optional[str]:
+    """§5.6: the max-pain pin-target note, shown only on a 0-DTE (expiry) day.
+
+    Max-pain dominates on expiry (R33), so naming the pin target makes it actionable
+    on Tue/Thu. None when the pinning index has no max-pain (empty/degraded chain).
+    """
+    if max_pain is None:
+        return None
+    return f"Pin target {max_pain} (max-pain) — price likely drawn here today."
 
 
 def days_to_expiry(expiry: date, today: date) -> int:

@@ -105,7 +105,9 @@ class SideVerdict(ApiModel):
     conviction: Conviction
     action: str = "WAIT"                     # the one-line verb: FADE OK / DON'T FADE / WAIT
     meaning: str                             # trader-facing line from the §5.2 table
-    tag: Optional[str] = None                # "EXPIRY/PIN" when an index is 0-DTE (§4)
+    # Canonical expiry marker (frontend maps to plain wording): "EXPIRY/PIN" when an
+    # index is 0-DTE (§4), else "NEAR-EXPIRY" when an index is 1-DTE (§1), else None.
+    tag: Optional[str] = None
 
     nifty_sig: str                           # compact state string (for the log)
     sensex_sig: Optional[str] = None
@@ -113,6 +115,19 @@ class SideVerdict(ApiModel):
     dte_s: Optional[int] = None
     suppressed: bool = False                 # NIFTY-ONLY (Sensex data missing, §4)
     expiry_label: str = ""
+    # §0/§5.4 — signed distance from the primary (Nifty) spot to the Nifty wall, in
+    # points and as % of spot, plus the proximity band. A fade only exists near the
+    # wall; prox says when to actually watch. None until a Nifty spot is known.
+    dist_pts: Optional[int] = None
+    dist_pct: Optional[float] = None
+    prox: Optional[Literal["AT", "APPROACHING", "FAR"]] = None
+    # §5.1 — the ONE plain-English instruction, composed from state + prox + side (+
+    # VIX/expiry overlays). "one line = one decision"; the #1 add. None until built.
+    action_line: Optional[str] = None
+    # §5.2 — the specific unmet condition printed next to a WAIT (e.g. "(Sensex
+    # quiet)", "(too far — 80pts)"), so a blank WAIT never leaves the trader guessing
+    # whether to keep watching or move on. None when the action is not WAIT.
+    wait_reason: Optional[str] = None
 
     nifty: WallSignal
     sensex: Optional[WallSignal] = None
@@ -141,6 +156,18 @@ class VerdictState(ApiModel):
     expiry: Optional[ExpiryAssessment] = None  # None until walls are locked
     metrics: List[IndexMetrics] = []         # max-pain + PCR per index (v3 §6)
     range_broken: List[IndexName] = []       # indices whose spot left the ladder (§3)
+    # §5.3 VIX regime — one India VIX for both indices. `vix_line` is the ready-made
+    # one-glance string; `vix_regime` (calm|normal|spiking) also overlays the action
+    # line. All None until a VIX has been stored for the day.
+    vix: Optional[float] = None
+    vix_regime: Optional[Literal["calm", "normal", "spiking"]] = None
+    vix_line: Optional[str] = None
+    # §5.6 — only on a 0-DTE (expiry) day: the max-pain pin target the price is likely
+    # drawn to. Uses the pinning index's max-pain. None on non-expiry days.
+    expiry_pin_note: Optional[str] = None
+    # §5.5 — early-session notice while no strike's OI series spans a full window yet
+    # (Δ% not computable): "Collecting data — first read in ~N min". None once warmed up.
+    warmup: Optional[str] = None
     sides: List[SideVerdict] = []
     note: Optional[str] = None               # e.g. "no walls locked yet"
 

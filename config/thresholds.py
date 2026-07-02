@@ -55,6 +55,28 @@ MAG_STRONG_PCT = 20.0
 # reference that would have pinned it exactly is not in the repo; spec wins).
 FLAT_PCT = MAG_MILD_PCT
 
+# --- Proximity bands (spec §5.4) -------------------------------------------
+# A fade only exists NEAR the wall — |dist| (points from spot to the wall) buckets
+# into AT WALL / APPROACHING / FAR, so the dashboard says when to actually watch.
+# Per-index, in each index's OWN points (Sensex ≈ ×3.2 the Nifty bands, same
+# relative level). {index: (at_max, approaching_max)}; |dist| ≤ at_max → AT WALL,
+# ≤ approaching_max → APPROACHING, else FAR. Tunable after live days.
+PROX_BANDS = {
+    "NIFTY": (25.0, 60.0),
+    "SENSEX": (75.0, 190.0),
+}
+
+# --- VIX regime (spec §5.3) ------------------------------------------------
+# Stops fading into a trend day at one glance. Level bands on India VIX (already in
+# the Fyers response), plus an intraday-jump override. Tunable — ties to R11
+# (VIX > 22 = no-trade) and R22 (IV crush):
+#   vix < 14           → calm, fade-friendly
+#   14 ≤ vix ≤ 20      → normal
+#   vix > 20  OR  intraday jump > 5% off the session-open VIX → spiking, don't fade
+VIX_CALM_MAX = 14.0
+VIX_NORMAL_MAX = 20.0
+VIX_INTRADAY_JUMP_PCT = 5.0
+
 # Ordered magnitude labels, weakest → strongest (for comparisons).
 MAGNITUDE_ORDER = ("noise", "mild", "signal", "strong")
 

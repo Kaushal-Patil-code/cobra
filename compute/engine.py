@@ -14,22 +14,36 @@ CLI:  uv run python -m compute.engine [YYYY-MM-DD] [window]
 from __future__ import annotations
 
 import logging
+import math
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, Optional
 
-from compute.expiry import assess_from_dates
-from compute.metrics import dominance_strength, ladder_broken
+from compute.expiry import assess_from_dates, expiry_pin_note
+from compute.metrics import (
+    dominance_strength,
+    ladder_broken,
+    proximity,
+    vix_line as compute_vix_line,
+    vix_regime as compute_vix_regime,
+    wall_distance,
+)
 from compute.pairing import build_wall_callout, pair_ladders_by_level
-from compute.series import read_monitored_strikes, read_oi_series
-from compute.verdict import build_wall_signal, side_verdict, strike_signal
+from compute.series import read_earliest_snapshot_ts, read_monitored_strikes, read_oi_series
+from compute.verdict import (
+    build_wall_signal,
+    compose_action_line,
+    compose_wait_reason,
+    side_verdict,
+    strike_signal,
+)
 from config.thresholds import (
     DEFAULT_WINDOW_MINUTES,
     SERIES_LOOKBACK_MINUTES,
     WINDOW_CHOICES,
 )
 from market.ladders import get_ladders
-from market.metrics_store import read_latest_metrics
+from market.metrics_store import read_day_open_vix, read_latest_metrics
 from schemas.market import MonitoredStrike
 from schemas.verdict import SideVerdict, VerdictState, WallSignal
 
@@ -116,6 +130,21 @@ def build_state(
         (m.ts for m in metrics_by_index.values() if m.ts is not None),
         default=None,
     )
+    # §5.3 VIX regime — one India VIX for both indices; take whichever tick carried it.
+    # The session-open VIX (earliest of the day) is the baseline for the intraday-jump
+    # override; only read it when a current VIX exists so no-VIX days skip the query.
+    vix = next((m.vix for m in metrics_by_index.values() if m.vix is not None), None)
+    vix_open = read_day_open_vix(trading_date) if vix is not None else None
+    regime = compute_vix_regime(vix, vix_open)
+    v_line = compute_vix_line(vix, regime)
+
+    # §5.6: on a 0-DTE (expiry) day only, name the max-pain pin target the price is
+    # likely drawn to — using the PINNING index's max-pain (Nifty and Sensex never
+    # share an expiry day, so at most one pins).
+    pin_index = "NIFTY" if assessment.nifty_pin else ("SENSEX" if assessment.sensex_pin else None)
+    pin_metric = metrics_by_index.get(pin_index) if pin_index else None
+    pin_note = expiry_pin_note(pin_metric.max_pain if pin_metric else None)
+
     ladders = get_ladders(trading_date)
     range_broken = [
         name for name, lad in ladders.items()
@@ -150,6 +179,26 @@ def build_state(
             if sensex_ms else None
         )
         sv = side_verdict(side, nifty_wall, sensex_wall, assessment)
+        # §0/§5.4: distance + proximity of the Nifty wall to the live Nifty spot (the
+        # primary decision surface). Signed pts + % of spot; prox band gates the fade.
+        sv.dist_pts, sv.dist_pct = wall_distance(sv.wall_strike, nspot)
+        sv.prox = proximity("NIFTY", sv.dist_pts)
+        # §5.2/§5.4: a fade only exists NEAR the wall — a would-be FADE OK is only
+        # actionable AT or APPROACHING it. Too far (or no live price yet) → WAIT
+        # (nothing to take right now). prox is only known here, so this distance nudge
+        # to the verb lives in the engine; keep `meaning` consistent with the new verb.
+        if sv.action == "FADE OK" and sv.prox not in ("AT", "APPROACHING"):
+            sv.action = "WAIT"
+            sv.meaning += (" (Too far to fade now — just watch.)" if sv.prox == "FAR"
+                           else " (No live price yet — just watch.)")
+        # §5.1: the one plain-English action line, composed once the verb is final,
+        # with the state-level VIX-spiking and 0-DTE expiry-pin overlays.
+        sv.action_line = compose_action_line(
+            sv, vix_regime=regime,
+            expiry_max_pain=(pin_metric.max_pain if pin_metric else None),
+        )
+        # §5.2: name the unmet condition behind a WAIT (never a blank WAIT).
+        sv.wait_reason = compose_wait_reason(sv)
         # Pair the two scored ladders by level (Nifty rung ↔ closest Sensex rung).
         sv.paired = pair_ladders_by_level(
             nifty_wall.ladder,
@@ -159,10 +208,27 @@ def build_state(
         sv.wall_callout = build_wall_callout(nifty_wall, sensex_wall, live_ratio)
         sides.append(sv)
 
+    # §5.5 warm-up notice: right after the open no strike's OI series spans a full
+    # window yet, so Δ% is blank (the primary Nifty wall reads "insufficient"). Tell
+    # the trader data is still collecting, and roughly how long until the first read —
+    # estimated from the session's earliest snapshot (only queried while warming up).
+    warmup: Optional[str] = None
+    if sides and sides[0].nifty.wall.insufficient:
+        day_start = datetime.combine(trading_date, datetime.min.time(), tzinfo=IST)
+        earliest = read_earliest_snapshot_ts(day_start)
+        if earliest is not None:
+            age_min = (ist_now - earliest.astimezone(IST)).total_seconds() / 60.0
+            minutes_left = max(0, math.ceil(window_minutes - age_min))
+        else:
+            minutes_left = window_minutes
+        warmup = f"Collecting data — first read in ~{minutes_left} min"
+
     return VerdictState(
         **base, data_ts=data_ts, live_ratio=live_ratio, expiry=assessment,
         metrics=list(metrics_by_index.values()),
         range_broken=range_broken, sides=sides,
+        vix=vix, vix_regime=regime, vix_line=v_line,
+        expiry_pin_note=pin_note, warmup=warmup,
     )
 
 

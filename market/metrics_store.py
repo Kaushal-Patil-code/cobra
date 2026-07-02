@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from db.db import get_conn
 from schemas.market import IndexMetrics
@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 
 _INSERT = """
 INSERT INTO index_metrics
-    (ts, trading_date, index_name, expiry, spot, atm, max_pain, pcr, call_oi, put_oi)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    (ts, trading_date, index_name, expiry, spot, atm, max_pain, pcr, call_oi, put_oi, vix)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 """
 
 
@@ -28,7 +28,7 @@ def insert_metrics(trading_date: date, ts: datetime, metrics: List[IndexMetrics]
         return 0
     values = [
         (ts, trading_date, m.index_name, m.expiry, m.spot, m.atm,
-         m.max_pain, m.pcr, m.call_oi, m.put_oi)
+         m.max_pain, m.pcr, m.call_oi, m.put_oi, m.vix)
         for m in metrics
     ]
     with get_conn() as conn, conn.cursor() as cur:
@@ -43,7 +43,7 @@ def read_latest_metrics(trading_date: date) -> Dict[str, IndexMetrics]:
         cur.execute(
             """
             SELECT DISTINCT ON (index_name)
-                   index_name, expiry, ts, spot, atm, max_pain, pcr, call_oi, put_oi
+                   index_name, expiry, ts, spot, atm, max_pain, pcr, call_oi, put_oi, vix
             FROM index_metrics
             WHERE trading_date = %s
             ORDER BY index_name, ts DESC
@@ -58,6 +58,25 @@ def read_latest_metrics(trading_date: date) -> Dict[str, IndexMetrics]:
             atm=r["atm"], max_pain=r["max_pain"],
             pcr=float(r["pcr"]) if r["pcr"] is not None else None,
             call_oi=r["call_oi"], put_oi=r["put_oi"],
+            vix=float(r["vix"]) if r["vix"] is not None else None,
         )
         for r in rows
     }
+
+
+def read_day_open_vix(trading_date: date) -> Optional[float]:
+    """The earliest VIX reading of the day — the session-open baseline for the §5.3
+    intraday-jump check. None if no VIX has been stored yet for the date."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT vix
+            FROM index_metrics
+            WHERE trading_date = %s AND vix IS NOT NULL
+            ORDER BY ts ASC
+            LIMIT 1
+            """,
+            (trading_date,),
+        )
+        row = cur.fetchone()
+    return float(row["vix"]) if row and row["vix"] is not None else None

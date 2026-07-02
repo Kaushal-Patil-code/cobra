@@ -9,8 +9,14 @@ from __future__ import annotations
 
 import math
 import statistics
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Tuple
 
+from config.thresholds import (
+    PROX_BANDS,
+    VIX_CALM_MAX,
+    VIX_INTRADAY_JUMP_PCT,
+    VIX_NORMAL_MAX,
+)
 from schemas.market import ChainSnapshot, IndexMetrics, StrikeOI
 
 # Ladder reach (v3 §3 / §13): ATM + 3 rungs up, 4 down (intentionally skewed down).
@@ -71,6 +77,38 @@ def ladder_broken(spot: float, strikes: Sequence[int]) -> bool:
     return spot < min(strikes) or spot > max(strikes)
 
 
+def wall_distance(
+    wall_strike: Optional[int], spot: Optional[float]
+) -> Tuple[Optional[int], Optional[float]]:
+    """Signed distance from `spot` to the wall (spec §0): `wall_strike − spot`.
+
+    Returns (points, percent_of_spot). Positive = wall ABOVE spot (a CAP still has
+    headroom); negative = wall BELOW spot (a FLOOR still has room, or the wall was
+    breached). None when either input is missing or spot is 0.
+    """
+    if wall_strike is None or spot is None or spot == 0:
+        return None, None
+    pts = wall_strike - spot
+    return round(pts), round(pts / spot * 100.0, 2)
+
+
+def proximity(index_name: str, dist_pts: Optional[float]) -> Optional[str]:
+    """AT / APPROACHING / FAR from |dist| using the index's own bands (spec §5.4).
+
+    A fade only exists near the wall, so this says when to actually watch. None when
+    the distance is unknown. Bands default to the Nifty set for an unknown index.
+    """
+    if dist_pts is None:
+        return None
+    at_max, approaching_max = PROX_BANDS.get(index_name, PROX_BANDS["NIFTY"])
+    a = abs(dist_pts)
+    if a <= at_max:
+        return "AT"
+    if a <= approaching_max:
+        return "APPROACHING"
+    return "FAR"
+
+
 def max_pain(strikes: Sequence[StrikeOI], atm: Optional[int] = None) -> Optional[int]:
     """Strike S minimising total option-writer payout over the full chain (v3 §6).
 
@@ -105,6 +143,39 @@ def pcr(call_oi: Optional[int], put_oi: Optional[int]) -> Optional[float]:
     return round(put_oi / call_oi, 3)
 
 
+def vix_regime(vix: Optional[float], vix_open: Optional[float] = None) -> Optional[str]:
+    """calm / normal / spiking from the VIX level, or a >5% intraday jump (spec §5.3).
+
+    `vix_open` is the session-open VIX baseline for the jump override — a fast rise
+    means a trend day even if the absolute level is still moderate. None when VIX is
+    unknown; the jump is skipped when `vix_open` is missing or non-positive.
+    """
+    if vix is None:
+        return None
+    jumped = (
+        vix_open is not None
+        and vix_open > 0
+        and (vix - vix_open) / vix_open * 100.0 > VIX_INTRADAY_JUMP_PCT
+    )
+    if vix > VIX_NORMAL_MAX or jumped:
+        return "spiking"
+    if vix < VIX_CALM_MAX:
+        return "calm"
+    return "normal"
+
+
+def vix_line(vix: Optional[float], regime: Optional[str]) -> Optional[str]:
+    """The one-glance VIX line for the dashboard (spec §5.3). None when unknown."""
+    if vix is None or regime is None:
+        return None
+    v = round(vix, 2)
+    if regime == "calm":
+        return f"VIX {v} — calm, fade-friendly"
+    if regime == "spiking":
+        return f"VIX {v} — spiking, trend risk, don't fade"
+    return f"VIX {v} — normal"
+
+
 def index_metrics_from_chain(chain: ChainSnapshot, interval: int) -> IndexMetrics:
     """Per-index, per-tick metrics from a parsed chain (v3 §6) — no extra API call."""
     atm = compute_atm(chain.spot, interval) if chain.spot is not None else None
@@ -117,4 +188,5 @@ def index_metrics_from_chain(chain: ChainSnapshot, interval: int) -> IndexMetric
         pcr=pcr(chain.call_oi, chain.put_oi),
         call_oi=chain.call_oi,
         put_oi=chain.put_oi,
+        vix=chain.vix,
     )

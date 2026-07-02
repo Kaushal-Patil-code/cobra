@@ -9,7 +9,9 @@ from compute.metrics import (
     ladder_broken,
     max_pain,
     pcr,
+    proximity,
     strength_bucket,
+    wall_distance,
 )
 from schemas.market import ChainSnapshot, StrikeOI
 
@@ -83,11 +85,63 @@ def test_dominance_strength():
     assert dom3 == 999999.99 and s3 == 5
 
 
+def test_wall_distance_signed_pts_and_pct():
+    # CAP wall above spot → positive; FLOOR wall below → negative. % is of spot.
+    pts, pct = wall_distance(24450, 24400.0)
+    assert pts == 50 and pct == round(50 / 24400 * 100, 2)
+    pts, pct = wall_distance(24000, 24120.0)
+    assert pts == -120 and pct == round(-120 / 24120 * 100, 2)
+    # unknown inputs
+    assert wall_distance(None, 24400.0) == (None, None)
+    assert wall_distance(24450, None) == (None, None)
+    assert wall_distance(24450, 0) == (None, None)
+
+
+def test_proximity_bands_per_index():
+    # Nifty bands 25 / 60 (§5.4), on |dist|.
+    assert proximity("NIFTY", 20) == "AT"
+    assert proximity("NIFTY", -25) == "AT"          # boundary inclusive, abs()
+    assert proximity("NIFTY", 40) == "APPROACHING"
+    assert proximity("NIFTY", 61) == "FAR"
+    # Sensex bands 75 / 190 (≈ ×3.2).
+    assert proximity("SENSEX", 70) == "AT"
+    assert proximity("SENSEX", 150) == "APPROACHING"
+    assert proximity("SENSEX", 200) == "FAR"
+    # unknown distance → None; unknown index falls back to Nifty bands.
+    assert proximity("NIFTY", None) is None
+    assert proximity("MYSTERY", 20) == "AT"
+
+
 def test_index_metrics_from_chain():
     strikes = [_s(24000, "CE", 50), _s(24000, "PE", 80),
                _s(24100, "CE", 200), _s(24100, "PE", 30)]
     ch = ChainSnapshot(index_name="NIFTY", fetched_at=datetime.now(timezone.utc),
-                       expiry=EXP, spot=24013.0, call_oi=1000, put_oi=1500, strikes=strikes)
+                       expiry=EXP, spot=24013.0, call_oi=1000, put_oi=1500, vix=13.5,
+                       strikes=strikes)
     m = index_metrics_from_chain(ch, 50)
     assert m.atm == 24000 and m.spot == 24013.0
     assert m.pcr == 1.5 and m.max_pain in (24000, 24100)
+    assert m.vix == 13.5                    # §5.3: VIX carried through from the chain
+
+
+def test_vix_regime_bands_and_jump():
+    from compute.metrics import vix_regime
+    assert vix_regime(None) is None
+    assert vix_regime(12.0) == "calm"
+    assert vix_regime(13.99) == "calm"
+    assert vix_regime(14.0) == "normal"       # 14 inclusive → normal
+    assert vix_regime(20.0) == "normal"       # 20 inclusive → normal
+    assert vix_regime(20.1) == "spiking"
+    # intraday jump > 5% off the session-open flips a moderate level to spiking
+    assert vix_regime(15.0, vix_open=14.0) == "spiking"   # +7.1%
+    assert vix_regime(14.5, vix_open=14.0) == "normal"    # +3.6% (below 5%)
+    assert vix_regime(13.0, vix_open=20.0) == "calm"      # a DROP is never a jump
+    assert vix_regime(15.0, vix_open=0) == "normal"       # non-positive baseline ignored
+
+
+def test_vix_line_wording():
+    from compute.metrics import vix_line
+    assert vix_line(None, None) is None
+    assert vix_line(12.34, "calm") == "VIX 12.34 — calm, fade-friendly"
+    assert vix_line(16.0, "normal") == "VIX 16.0 — normal"
+    assert vix_line(24.5, "spiking") == "VIX 24.5 — spiking, trend risk, don't fade"

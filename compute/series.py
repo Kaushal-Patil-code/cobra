@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime
-from typing import Dict, List, Sequence
+from typing import Dict, List, Optional, Sequence
 
 from db.db import get_conn
 from schemas.market import MonitoredStrike, SnapshotPoint
@@ -32,6 +32,18 @@ def read_monitored_strikes(trading_date: date) -> List[MonitoredStrike]:
         )
         rows = cur.fetchall()
     return [MonitoredStrike(**r) for r in rows]
+
+
+def read_earliest_snapshot_ts(since: datetime) -> Optional[datetime]:
+    """The earliest snapshot ts at-or-after `since` — the session's first read.
+
+    Backs the §5.5 warm-up estimate ("first read in ~N min"): how long until a
+    strike's OI series spans a full Δ% window. None when no snapshot exists yet.
+    """
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT min(ts) AS first_ts FROM snapshots WHERE ts >= %s", (since,))
+        row = cur.fetchone()
+    return row["first_ts"] if row and row["first_ts"] is not None else None
 
 
 def read_oi_series(

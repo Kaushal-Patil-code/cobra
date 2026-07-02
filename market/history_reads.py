@@ -107,7 +107,7 @@ def read_metrics(*, start=None, end=None, index=None, limit=100, cursor=None, or
         where.append("index_name = %s"); params.append(index)
     return _keyset(
         "index_metrics",
-        "id, ts, trading_date, index_name, expiry, spot, atm, max_pain, pcr, call_oi, put_oi",
+        "id, ts, trading_date, index_name, expiry, spot, atm, max_pain, pcr, call_oi, put_oi, vix",
         "ts", where=where, params=params, cursor=cursor, limit=limit, order=order,
     )
 

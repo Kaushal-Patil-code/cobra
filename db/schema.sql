@@ -145,7 +145,8 @@ create table if not exists index_metrics (
     max_pain     integer,
     pcr          numeric(10, 4),
     call_oi      bigint,
-    put_oi       bigint
+    put_oi       bigint,
+    vix          numeric(8, 4)                          -- India VIX at this tick (§5.3 regime)
 );
 
 create index if not exists index_metrics_lookup_idx

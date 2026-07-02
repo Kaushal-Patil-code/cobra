@@ -10,6 +10,7 @@ from compute.expiry import (
     LABEL_NIFTY_ONLY,
     assess_from_dates,
     days_to_expiry,
+    expiry_pin_note,
 )
 
 NIFTY_TUE_1 = date(2026, 6, 23)
@@ -20,6 +21,11 @@ SENSEX_THU_2 = date(2026, 6, 25)
 def test_days_to_expiry():
     assert days_to_expiry(date(2026, 6, 23), date(2026, 6, 19)) == 4
     assert days_to_expiry(date(2026, 6, 18), date(2026, 6, 18)) == 0  # expiry day
+
+
+def test_expiry_pin_note():
+    assert expiry_pin_note(24000) == "Pin target 24000 (max-pain) — price likely drawn here today."
+    assert expiry_pin_note(None) is None
 
 
 def test_friday_both_clean():           # Nifty 4, Sensex 6 → active, no pin

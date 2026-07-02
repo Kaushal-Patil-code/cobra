@@ -6,8 +6,11 @@ the call wall, FLOOR for the put wall). v3 changes vs the old port:
   - role (RESISTANCE/SUPPORT) → side (CAP/FLOOR).
   - No expiry suppression (§4): NIFTY-ONLY only when Sensex *data* is missing.
   - EXPIRY/PIN guard (§4): an OI *unwind* on a 0-DTE index is settlement, read as
-    PIN/HOLD — it must never drive a BREAKOUT/BREAKDOWN. Conviction is capped at
-    MODERATE whenever a pinning index is involved (never size up on settlement).
+    PIN/HOLD — it must never drive a BREAKOUT/BREAKDOWN.
+  - Near/at-expiry trust (§1): near (1-DTE) or at (0-DTE) expiry, the wall has
+    MATURED, so a HOLDING read reaches HIGH conviction MORE easily (the pin makes it
+    a stronger barrier). Trust is no longer downgraded on expiry; only the sizing
+    lever (₹2,000 cap / max-2-trades) bounds risk, and that lives outside this engine.
 
 Pipeline per fetch:
   series (per strike)
@@ -220,8 +223,10 @@ def _moving(state: IndexState) -> bool:
 
 
 def _effective_state(state: IndexState, is_pin: bool) -> IndexState:
-    """v3 §4 PIN guard: a 0-DTE OI unwind is settlement → read as HOLD (building),
-    never a breakout. Building/flat on a pinning index are left untouched."""
+    """v3 §4 PIN guard: a 0-DTE OI unwind on the NEAREST (read) chain is settlement —
+    its OI drains as it settles, and it isn't even the chain being traded (read-near /
+    trade-next, see compute.expiry) — so read it as HOLD (building), never a breakout.
+    Building/flat on a pinning index are left untouched."""
     if is_pin and state == "unwinding":
         return "building"
     return state
@@ -244,14 +249,19 @@ def _action(verdict: str, conviction: str, strength: Optional[int], state: Index
     """
     v = verdict.upper()
     strong = (strength or 0) >= MIN_FADE_STRENGTH
+    # §2: a fade only exists for a wall that is BUILDING or STABLE. NEVER fade a wall
+    # that is actually unwinding — a str-5 unwind is a real break, not a fade. Today
+    # this is already structural (HOLDING ⟹ building, NO SIGNAL ⟹ flat), but the guard
+    # documents the invariant so a future change can't accidentally fade a break.
+    fadeable = strong and state != "unwinding"
     if "BREAKOUT" in v or "BREAKDOWN" in v:
         return "DON'T FADE" if conviction != "UNCONFIRMED" else "WAIT"
     if "DIVERGENCE" in v or v.startswith("PARTIAL"):
         return "WAIT"
     if "HOLDING" in v:
-        return "FADE OK" if strong else "WAIT"
+        return "FADE OK" if fadeable else "WAIT"
     if "NO SIGNAL" in v:                      # quiet: fade only a stable + dominant wall
-        return "FADE OK" if (strong and state == "flat") else "WAIT"
+        return "FADE OK" if (fadeable and state == "flat") else "WAIT"
     return "WAIT"
 
 
@@ -264,8 +274,10 @@ def side_verdict(
     """The §5.2 table for one side, with the §4 EXPIRY/PIN guard applied.
 
     NIFTY-ONLY only when Sensex DATA is missing (not expiry). A 0-DTE index can't
-    produce a breakout (its unwind reads as HOLD), and any pin caps conviction at
-    MODERATE so the trader never sizes up on settlement.
+    produce a breakout (its unwind reads as HOLD). Per §1, a matured (near/at-expiry)
+    wall is trusted MORE — a HOLDING read reaches HIGH conviction more easily and is
+    never downgraded; sizing stays bounded by the ₹2,000 cap / max-2-trades, a lever
+    outside this engine (so there is no MODERATE conviction cap on expiry any more).
     """
     hold, brk = _labels(side)
     option_type = "CE" if side == "CAP" else "PE"
@@ -273,7 +285,19 @@ def side_verdict(
     dte_s = assessment.sensex.dte if assessment.sensex else None
     nifty_only = assessment.sensex_missing or sensex is None
     pin_involved = assessment.nifty_pin or assessment.sensex_pin
-    tag = "EXPIRY/PIN" if pin_involved else None
+    near_expiry_involved = assessment.nifty.near_expiry or (
+        assessment.sensex is not None and assessment.sensex.near_expiry
+    )
+    # §1 LOGIC CHANGE (near-expiry now = MORE trust, not less): near (1-DTE) OR at
+    # (0-DTE) expiry means the wall has MATURED — positions are committed and the
+    # strike pins price, so a heavy wall is a STRONGER barrier and a FADE deserves
+    # HIGHER conviction. This lowers the bar to HIGH for a HOLDING wall; it does NOT
+    # size the trade up (the ₹2,000 cap / max-2-trades handle sizing — §1 risk note),
+    # and it does NOT relax the 0-DTE guard below (an unwind is still settlement).
+    mature = pin_involved or near_expiry_involved
+    # Canonical tag marker; the frontend maps it to plain wording. A 0-DTE pin takes
+    # priority over a 1-DTE near-expiry.
+    tag = "EXPIRY/PIN" if pin_involved else ("NEAR-EXPIRY" if near_expiry_involved else None)
 
     # Surface the pin state on the wall signals (display only).
     nifty.pin = assessment.nifty_pin
@@ -299,8 +323,8 @@ def side_verdict(
             verdict, conv, meaning = "NO SIGNAL (NIFTY-ONLY)", "NONE", "Quiet; Sensex unavailable."
         else:  # nodata
             verdict, conv, meaning = "NO SIGNAL (NIFTY-ONLY)", "NONE", "Insufficient history yet; Sensex unavailable."
-        if pin_involved and conv == "HIGH":
-            conv = "MODERATE"
+        # NIFTY-ONLY never reaches HIGH (no cross-confirm), and §1 does not lift that:
+        # a matured wall can't substitute for the missing Sensex check. Conviction stays.
         action = _action(verdict, conv, nifty.strength, n)
         if action == "WAIT" and ("HOLDING" in verdict.upper() or "NO SIGNAL" in verdict.upper()):
             if (nifty.strength or 0) < MIN_FADE_STRENGTH:
@@ -319,10 +343,16 @@ def side_verdict(
             both_signal = magnitude_at_least(nifty.wall.magnitude, "signal") and \
                 magnitude_at_least(sensex.wall.magnitude, "signal")
             either_trend = nifty.wall.trend or sensex.wall.trend
-            conv = "HIGH" if (both_signal or either_trend) else "MODERATE"
+            # §1: a matured (near/at-expiry) wall reaches HIGH on its own — the pin
+            # makes the barrier stronger, so a HOLDING read is trusted more, not less.
+            conv = "HIGH" if (both_signal or either_trend or mature) else "MODERATE"
             verdict = hold
-            meaning = ("Fade OK. HIGH → hold full target / size up." if conv == "HIGH"
-                       else "Fade OK (moderate) — hold, normal size.")
+            if conv == "HIGH":
+                meaning = ("Fade OK — wall matured near expiry; strong hold (size by the "
+                           "risk cap, not conviction)." if mature
+                           else "Fade OK. HIGH — hold full target.")
+            else:
+                meaning = "Fade OK (moderate) — hold, normal size."
         elif n == "unwinding" and s == "unwinding":
             confirmed = (nifty.wall.streak >= MIN_CONFIRM_STREAK
                          and sensex.wall.streak >= MIN_CONFIRM_STREAK)
@@ -342,10 +372,10 @@ def side_verdict(
     else:                                # both quiet (flat / nodata)
         verdict, conv, meaning = "NO SIGNAL", "NONE", "Quiet."
 
-    # PIN guard: never size up on a settlement day — cap conviction at MODERATE.
-    if pin_involved and conv == "HIGH":
-        conv = "MODERATE"
-        meaning += " (pin day — capped, don't size up on settlement.)"
+    # §1: no conviction cap on expiry any more. A 0-DTE unwind is already neutralised
+    # to HOLD by _effective_state above (settlement never becomes a breakout), and a
+    # matured wall is trusted MORE, not less. Position sizing stays bounded by the
+    # ₹2,000 cap / max-2-trades (risk note) — that lever is outside the verdict engine.
 
     action = _action(verdict, conv, nifty.strength, n)
     if action == "WAIT" and ("HOLDING" in verdict.upper() or "NO SIGNAL" in verdict.upper()):
@@ -359,3 +389,97 @@ def side_verdict(
         dte_n=dte_n, dte_s=dte_s, suppressed=False, expiry_label=assessment.label,
         nifty=nifty, sensex=sensex,
     )
+
+
+# ---------------------------------------------------------------------------
+# The ACTION line (§5.1) — one plain instruction = one decision (the #1 add)
+# ---------------------------------------------------------------------------
+
+def compose_action_line(
+    sv: SideVerdict,
+    vix_regime: Optional[str] = None,
+    expiry_max_pain: Optional[int] = None,
+) -> str:
+    """Compose the single plain-English instruction from state + prox + side (§5.1).
+
+    Reads the already-computed SideVerdict (verdict / conviction / prox / dist / side
+    / suppressed) plus two state-level overlays: `vix_regime` (append a trend-risk
+    note when spiking) and `expiry_max_pain` (append the pin target on a 0-DTE day —
+    pass None off expiry). It ends by pointing to the trader's own trigger ("wait for
+    your 5-min candle"), never a bare "just buy".
+    """
+    side_word = "Top" if sv.side == "CAP" else "Bottom"      # CAP = the top wall
+    fade_word = "buy PE" if sv.side == "CAP" else "buy CE"    # fade the cap with PE, the floor with CE
+    v = sv.verdict.upper()
+    dist = abs(sv.dist_pts) if sv.dist_pts is not None else None
+    dist_txt = f"{dist}pts" if dist is not None else "some way"
+
+    if "BREAKOUT" in v or "BREAKDOWN" in v:
+        updown = "up" if "BREAKOUT" in v else "down"
+        base = f"{side_word} breaking {updown} — DON'T FADE, stand aside."
+        if sv.conviction == "UNCONFIRMED":
+            base += " (1 read only — wait to confirm.)"
+    elif "HOLDING" in v:
+        # HOLDING ⟹ both indices building (aligned) → "both agree"; NIFTY-ONLY → "Nifty alone".
+        agree = "Nifty alone" if sv.suppressed else "both agree"
+        # Only invite a fade when the wall is actually fade-able (thick enough AND close
+        # enough — the engine has already resolved the verb). A held-but-unfade-able wall
+        # gets a plain "just watch", never a "FADE-NOW" the verb would contradict.
+        if sv.action != "FADE OK":
+            if sv.prox == "FAR":
+                base = f"{side_word} holding but price {dist_txt} away → too far, just watch."
+            elif sv.prox in ("AT", "APPROACHING"):
+                base = f"{side_word} holding, {agree}, but the wall's too thin to fade — just watch."
+            else:                                # no spot yet → can't place the fade
+                base = f"{side_word} holding, {agree} — waiting on a live price."
+        elif sv.prox == "AT":
+            base = (f"{side_word} holding, {agree}, price {dist_txt} away → "
+                    f"FADE-NOW zone ({fade_word}). Wait for your 5-min candle.")
+        elif sv.prox == "APPROACHING":
+            base = (f"{side_word} holding, {agree}, price {dist_txt} away → "
+                    f"get ready to fade ({fade_word}).")
+        else:                                    # fade-able but no prox — shouldn't occur
+            base = f"{side_word} holding, {agree}."
+    elif "DIVERGENCE" in v:
+        base = "Nifty & Sensex disagree — skip or tiny only."
+    elif v.startswith("PARTIAL"):
+        moving = "Nifty" if sv.nifty.state in ("building", "unwinding") else "Sensex"
+        base = f"Only {moving} moving, other quiet — wait for both."
+    elif sv.suppressed:                          # NIFTY-ONLY, quiet/unclear
+        base = "No Sensex check — Nifty alone, be careful."
+    else:                                        # NO SIGNAL
+        base = "Both quiet — nothing to do."
+
+    if vix_regime == "spiking":
+        base += " · VIX spiking, trend risk."
+    if expiry_max_pain is not None:
+        base += f" · Expiry pin {expiry_max_pain}."
+    return base
+
+
+def compose_wait_reason(sv: SideVerdict) -> Optional[str]:
+    """The specific unmet condition behind a WAIT (§5.2) — never a blank WAIT.
+
+    None unless the action is WAIT. Priority follows the spec's list: an unconfirmed
+    break, then a disagreement, a one-sided (partial) read, price too far from the
+    wall, and finally a wall too thin to fade. Distance-based reason names the gap.
+    """
+    if sv.action != "WAIT":
+        return None
+    v = sv.verdict.upper()
+    if sv.conviction == "UNCONFIRMED":
+        return "(1 read only)"
+    if "DIVERGENCE" in v:
+        return "(they disagree)"
+    if v.startswith("PARTIAL"):
+        # PARTIAL = exactly one index moving; name the quiet (flat) one.
+        flat = "Nifty" if sv.nifty.state not in ("building", "unwinding") else "Sensex"
+        return f"({flat} quiet)"
+    if sv.prox == "FAR":
+        dist = abs(sv.dist_pts) if sv.dist_pts is not None else None
+        return f"(too far — {dist}pts)" if dist is not None else "(too far)"
+    if sv.prox is None:
+        return "(waiting on live price)"     # no spot yet — can't place the fade
+    if "HOLDING" in v or "NO SIGNAL" in v:
+        return "(thin wall — hold off)"      # a fade-able state but strength < 3
+    return None
